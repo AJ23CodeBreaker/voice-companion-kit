@@ -1,0 +1,37 @@
+# Security headers. This file format is understood by Netlify and Cloudflare
+# Pages as-is; on other hosts, translate it to whatever they use. Serving this
+# page without these is a real downgrade, not a formality.
+#
+# EDIT THE TWO PLACEHOLDER ORIGINS BELOW before deploying, or the page will not
+# be able to reach your Worker at all.
+
+/*
+  # The page asks for the microphone. Without this, some browsers refuse.
+  Permissions-Policy: microphone=(self)
+  X-Frame-Options: SAMEORIGIN
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+  # 'unsafe-inline' on script/style is required because index.html is a single
+  # hand-written file with inline <script>/<style> and no build step to inject
+  # nonces. It is a genuine weakening - it is also the honest trade for a page
+  # with no dependencies and no third-party code. If you add a build step, add
+  # nonces and drop it.
+  #
+  # connect-src is the important line: it is scoped to your Worker and your STT
+  # provider and nothing else, so a script injected somehow still cannot post
+  # your users' conversations anywhere. Replace both placeholders.
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; connect-src 'self' https://YOUR-WORKER.workers.dev wss://YOUR-WORKER.workers.dev https://api.deepgram.com wss://api.deepgram.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'
+
+# The app is one hand-written HTML file with no content-hashed filenames, so
+# there is nothing to bust a cache with. Without this a deploy can leave a
+# browser running yesterday's page indefinitely - which silently invalidated a
+# whole latency measurement session once.
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
+
+/config.js
+  Cache-Control: no-cache

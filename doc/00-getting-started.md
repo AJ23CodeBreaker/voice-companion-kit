@@ -165,5 +165,23 @@ npx wrangler secret put APP_SHARED_KEY
 
 Then add your real frontend origin to `ALLOWED_ORIGINS` and redeploy.
 
+### Before you put the page on the public internet
+
+`web/_headers` carries the security headers — CSP, framing, referrer policy. It
+works as-is on Netlify and Cloudflare Pages; translate it for other hosts.
+
+**Edit the two `YOUR-WORKER.workers.dev` placeholders in it first.** The
+`connect-src` line is the one that matters: it scopes outbound connections to
+your Worker and your speech provider, so injected script still cannot post your
+users' conversations elsewhere. Left unedited, the page cannot reach your Worker
+at all.
+
+### A note on cost
+
+Durable Objects have historically required Cloudflare's paid Workers plan. The
+terms change; check the current pricing before you plan around it. `wrangler
+dev` runs the whole stack locally for free either way, so you can evaluate all
+of this before that question matters.
+
 > **Always redeploy after editing any `.txt` in `personas/`.** They are compiled
 > into the bundle at build time, so an edit alone changes nothing.

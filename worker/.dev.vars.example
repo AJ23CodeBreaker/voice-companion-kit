@@ -1,0 +1,22 @@
+# Copy to .dev.vars (gitignored) and fill in. Used by `wrangler dev` and by the
+# eval harnesses via --env-file-if-exists.
+#
+# For a deployed Worker these are secrets, not vars:
+#   wrangler secret put OPENROUTER_API_KEY
+
+# The one model call on the hot path, and the summariser call after hang-up.
+OPENROUTER_API_KEY=sk-or-...
+
+# Text to speech. Any provider works - src/tts.ts is one file.
+FISH_API_KEY=...
+
+# Fallback voice id, used by any character whose literal is empty. The shipped
+# demo character has an empty literal, so setting this is enough to hear her.
+FISH_VOICE_ID=...
+
+# Speech to text, for the voice path. Text mode does not need it.
+DEEPGRAM_API_KEY=...
+
+# Admin key for /auth/register and the admin endpoints. Generate a long random
+# one. Anyone holding it can create accounts on your Worker.
+APP_SHARED_KEY=

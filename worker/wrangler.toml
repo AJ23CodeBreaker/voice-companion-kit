@@ -1,0 +1,50 @@
+name = "voice-companion"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── Durable Objects ───────────────────────────────────────────
+#
+# Three, with different lifetimes, and the difference matters.
+
+# One instance per live WebSocket connection: turn count, interrupt state.
+# Created with newUniqueId(), so it dies when the socket does.
+[[durable_objects.bindings]]
+name = "SESSION"
+class_name = "VoiceSession"
+
+# A single named instance holding accounts and session tokens.
+[[durable_objects.bindings]]
+name = "AUTH"
+class_name = "AuthStore"
+
+# One instance per USER — working memory, episodes, facts, open loops.
+# Keyed by the verified user id from the token, never by anything the client
+# sends. Memory is per-character, but the character is a COLUMN here, not a
+# separate instance: one instance keeps connect to a single round trip and
+# keeps "delete everything I ever said" a single operation.
+[[durable_objects.bindings]]
+name = "MEMORY"
+class_name = "UserMemory"
+
+# SQLite-backed classes must be declared in a migration, and the tag must
+# never be reused or reordered once deployed.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VoiceSession", "AuthStore", "UserMemory"]
+
+# ── Observability ─────────────────────────────────────────────
+#
+# Mirrored here rather than set in the dashboard, because dashboard-only
+# settings are RESET BY THE NEXT `wrangler deploy`.
+#
+# Before you turn this on, know what it retains. No log line here records
+# message or reply text — `turn_received` logs message_len, a number. What IS
+# retained is username, character, turn counts and timings: who talked to whom
+# and when. For a companion product that is not nothing. Decide deliberately.
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1

@@ -1,0 +1,2417 @@
+<!-- Anteros — Voice page. Live frontend, deployed to Netlify.
+     Backend is the Cloudflare Worker configured in config.js.
+     Requires sign-in; the Worker rejects unauthenticated requests. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice Companion</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      background: #050509;
+      color: #f7f7fb;
+      font-family: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    body { display: flex; flex-direction: column; }
+
+    /* ── Background video ─────────────────────────────────
+       Two stacked layers so switching character crossfades instead of
+       flashing black: the incoming clip loads in the hidden layer and is
+       only faded up once it can actually play. */
+    /* Shown when a character has no background clip, which is how this kit
+       ships: web/bg/ is empty. The video machinery below is left intact --
+       drop <character-id>.mp4 into web/bg/ and it takes over with a crossfade.
+       A missing clip leaves this in place rather than flashing to black. */
+    body {
+      background:
+        radial-gradient(120% 90% at 50% 0%, #1b2030 0%, #0b0d14 55%, #06070b 100%);
+    }
+
+    .bg-video {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      z-index: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .6s ease;
+    }
+    .bg-video.showing { opacity: 0.68; }
+    #bg-scrim {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      /* Light overall wash + darker top/bottom bands only — keeps the
+         video clearly visible in the middle while still protecting the
+         topbar and stage text from washing out against bright footage. */
+      background:
+        linear-gradient(to bottom,
+          rgba(5,5,9,0.55) 0%, rgba(5,5,9,0.15) 18%,
+          rgba(5,5,9,0.15) 70%, rgba(5,5,9,0.6) 100%);
+      pointer-events: none;
+    }
+
+    /* Everything else sits above the video + scrim */
+    #topbar, #stage, #latency, #debug-info, #error-box {
+      position: relative;
+      z-index: 2;
+    }
+
+    /* ── Top bar ─────────────────────────────────────────── */
+    #topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px 24px;
+      flex: 0 0 auto;
+    }
+    #brand { display: flex; align-items: baseline; gap: 8px; }
+    #brand-name { font-size: 14px; font-weight: 600; letter-spacing: 0.02em; text-shadow: 0 1px 8px rgba(0,0,0,0.5); }
+    #beta-badge {
+      font-size: 7px;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: rgba(122,224,210,0.75);
+      border: 1px solid rgba(122,224,210,0.3);
+      border-radius: 4px;
+      padding: 2px 5px;
+    }
+    #conn-dot {
+      font-size: 10px;
+      color: rgba(247,247,251,0.38);
+      letter-spacing: 0.02em;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: color .3s;
+    }
+    #conn-dot::before {
+      content: '';
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    #conn-dot.live { color: rgba(90,224,150,0.85); }
+    #conn-dot.down { color: rgba(240,105,105,0.85); }
+
+    /* Signed-in identity + sign out, grouped so the topbar right side
+       stays one unit rather than two floating items. */
+    #topbar-right { display: flex; align-items: center; gap: 14px; }
+    #whoami {
+      font-size: 10px;
+      letter-spacing: 0.02em;
+      color: rgba(247,247,251,0.42);
+      text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+    }
+    #logout-btn {
+      font-family: inherit;
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(247,247,251,0.55);
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 9999px;
+      padding: 5px 12px;
+      cursor: pointer;
+      transition: background .2s, color .2s, border-color .2s;
+    }
+    #logout-btn:hover {
+      background: rgba(255,255,255,0.12);
+      color: #fff;
+      border-color: rgba(255,255,255,0.22);
+    }
+    #logout-btn:disabled { opacity: .5; cursor: default; }
+    #whoami[hidden], #logout-btn[hidden] { display: none; }
+
+    /* ── Stage ──────────────────────────────────────────── */
+    /* The background video IS the character, and her face is in the upper
+       half of the frame. So the entire control stack — title, description,
+       character buttons, mode, Start — is pushed to the BOTTOM, below the
+       wave and the standing instruction. The top of the screen is left empty
+       on purpose: it is the picture.
+
+       Visual order is set with `order` rather than by moving markup, so the
+       DOM keeps its reading order for screen readers and the tab sequence
+       stays sensible. */
+    #stage {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      /* `safe flex-end` pins the stack to the bottom when there is room, and
+         falls back to the start edge when there is not. Plain `flex-end`
+         clips the TOP of an overflowing flex column, and that clipped region
+         cannot be scrolled to. */
+      justify-content: safe flex-end;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      gap: clamp(8px, 1.4vh, 16px);
+      padding: 0 24px 8px;
+      text-align: center;
+    }
+
+    /* Top of the stack: the picture's own furniture. */
+    #chat-panel  { order: 2; }
+    #user-text   { order: 3; }
+    #reply-text  { order: 4; }
+    /* Then the controls, in the order they read. */
+    #status      { order: 5; }
+    #headline    { order: 6; }
+    #wave-wrap   { order: 7; }
+    #char-desc   { order: 8; }
+    #char-picker { order: 9; }
+    #mode-picker { order: 10; }
+    #startup     { order: 11; }
+    #session-btn { order: 12; }
+
+    #status,
+    #headline,
+    #char-desc,
+    #startup { max-width: min(560px, 92vw); }
+
+    /* Back to a wrapping row: down at the bottom of the frame there is
+       nothing behind them worth protecting, and a row is far shorter than a
+       column of nine. */
+    #char-picker,
+    #mode-picker {
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .char-chip,
+    .mode-chip { white-space: nowrap; }
+
+    #user-text,
+    #reply-text { align-self: stretch; }
+
+    #status {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: rgba(247,247,251,0.55);
+      text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+      transition: color .3s;
+    }
+    body.listening  #status { color: rgba(90,224,150,0.85); }
+    body.processing #status { color: rgba(146,168,250,0.85); }
+    body.speaking   #status { color: rgba(214,168,250,0.9); }
+
+    #headline {
+      font-weight: 500;
+      font-size: clamp(26px, 5vw, 40px);
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+      background: linear-gradient(to right, oklch(90% 0.052 85), oklch(81% 0.094 55), oklch(74% 0.078 32));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      filter: drop-shadow(0 2px 14px rgba(0,0,0,0.55));
+    }
+
+    /* Description sits under the name. It used to be a cool grey at 62%
+       opacity, which read as disabled text rather than as part of her.
+       Now it is warm sand — the same earth family as the headline gradient,
+       one step down in lightness and chroma so it stays subordinate to the
+       name without disappearing. A flat colour, not a gradient: the gradient
+       is what makes the name the focal point, and two of them compete. */
+    #char-desc {
+      font-size: clamp(16px, 2.7vw, 21px);
+      font-weight: 450;
+      line-height: 1.4;
+      letter-spacing: 0.004em;
+      color: oklch(79% 0.09 66);
+      /* Doubled up: the first shadow keeps it legible over a bright frame of
+         video, the second stops the warm tone glowing out into the plate. */
+      text-shadow: 0 1px 3px rgba(0,0,0,0.7), 0 2px 12px rgba(0,0,0,0.5);
+      max-width: min(470px, 88vw);
+      margin-top: 1px;
+      transition: opacity .25s ease;
+    }
+
+    #char-picker {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      max-width: min(480px, 88vw);
+    }
+    .char-chip {
+      padding: 7px 16px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.067);
+      color: rgba(247,247,251,0.75);
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background .2s, border-color .2s, color .2s;
+    }
+    .char-chip:hover  { background: rgba(255,255,255,0.12); }
+    .char-chip.active {
+      background: rgba(122,240,200,0.14);
+      border-color: rgba(122,240,200,0.4);
+      color: #eafff6;
+    }
+    body.insession #char-picker { display: none; }   /* lock choice once a session starts */
+
+    /* ── Input mode (voice | text) ──────────────────────────
+       Same chip language as the character picker, so the two rows read as
+       one control group. Locked once a session starts, for the same reason
+       the character is. */
+    #mode-picker { display: flex; justify-content: center; gap: 8px; }
+    body.insession #mode-picker { display: none; }
+    .mode-chip {
+      padding: 6px 14px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.05);
+      color: rgba(247,247,251,0.6);
+      font-family: inherit; font-size: 11px; font-weight: 500;
+      cursor: pointer;
+      transition: background .2s, border-color .2s, color .2s;
+    }
+    .mode-chip:hover { background: rgba(255,255,255,0.10); }
+    .mode-chip.active {
+      background: rgba(241,177,134,0.16);
+      border-color: rgba(241,177,134,0.42);
+      color: #f6e2cf;
+    }
+
+    /* ── Text mode: conversation window ─────────────────────
+       Earth tones matching the headline gradient (sand / amber / clay), not
+       the older mint accent. Fixed height so the page never grows — the
+       problem the subtitle rework fixed for voice mode. */
+    #chat-panel {
+      display: none;
+      flex-direction: column;
+      width: min(560px, 92vw);
+      height: clamp(220px, 42vh, 400px);
+      border: 1px solid rgba(241,177,134,0.18);
+      border-radius: 16px;
+      background: rgba(28,20,14,0.52);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      overflow: hidden;
+    }
+    /* Visible as soon as Text is picked, not only once a session runs — the
+       mode is otherwise indistinguishable from a dead button. Idle shows the
+       panel with its input disabled, so what you get is obvious before you
+       commit to starting. */
+    body.textmode #chat-panel { display: flex; }
+    body.textmode:not(.insession) #chat-input,
+    body.textmode:not(.insession) #chat-send,
+    body.textmode:not(.insession) #voice-toggle { opacity: .45; pointer-events: none; }
+    body.textmode:not(.insession) #chat-log::after {
+      content: 'Press Start Chat, then type to her here.';
+      color: rgba(247,247,251,0.45);
+      font-size: 13px;
+      font-style: italic;
+    }
+    /* In text mode the voice furniture has no job. */
+    body.textmode #wave-wrap,
+    body.textmode #user-text,
+    body.textmode #reply-text { display: none; }
+
+    #chat-log {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 16px 16px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      text-align: left;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(241,177,134,0.28) transparent;
+    }
+    #chat-log::-webkit-scrollbar { width: 6px; }
+    #chat-log::-webkit-scrollbar-thumb {
+      background: rgba(241,177,134,0.28); border-radius: 3px;
+    }
+    .msg {
+      max-width: 86%;
+      padding: 9px 13px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      opacity: 0;
+      animation: burstIn .3s ease forwards;
+    }
+    .msg.user {
+      align-self: flex-end;
+      background: rgba(241,177,134,0.16);
+      border: 1px solid rgba(241,177,134,0.24);
+      color: #f7e6d5;
+      border-bottom-right-radius: 5px;
+    }
+    .msg.her {
+      align-self: flex-start;
+      background: rgba(255,255,255,0.055);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(247,247,251,0.86);
+      border-bottom-left-radius: 5px;
+    }
+    .msg.pending { opacity: .55; font-style: italic; }
+
+    #chat-input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      padding: 10px 12px 12px;
+      border-top: 1px solid rgba(241,177,134,0.14);
+    }
+    #chat-input {
+      flex: 1;
+      resize: none;
+      max-height: 96px;
+      min-height: 38px;
+      padding: 9px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.28);
+      color: #f7f7fb;
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1.45;
+      outline: none;
+      transition: border-color .2s;
+    }
+    #chat-input::placeholder { color: rgba(247,247,251,0.3); }
+    #chat-input:focus { border-color: rgba(241,177,134,0.5); }
+    #chat-send {
+      flex: 0 0 auto;
+      height: 38px;
+      padding: 0 18px;
+      border-radius: 12px;
+      border: 1px solid rgba(241,177,134,0.34);
+      background: rgba(241,177,134,0.18);
+      color: #f7e6d5;
+      font-family: inherit; font-size: 13px; font-weight: 600;
+      cursor: pointer;
+      transition: background .2s, opacity .2s;
+    }
+    #chat-send:not(:disabled):hover { background: rgba(241,177,134,0.3); }
+    #chat-send:disabled { opacity: .4; cursor: default; }
+    #voice-toggle {
+      flex: 0 0 auto;
+      height: 38px; width: 38px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.05);
+      color: rgba(247,247,251,0.62);
+      font-size: 15px; cursor: pointer;
+      transition: background .2s, color .2s;
+    }
+    #voice-toggle:hover { background: rgba(255,255,255,0.1); }
+    #voice-toggle.muted { color: rgba(247,247,251,0.28); }
+
+    /* Its own row, sitting under the title. Deliberately shallow: the
+       strands should read as a response to a voice, not as a graph. Max
+       vertical travel is WAVE_AMP x this height (see drawWave). */
+    #wave-wrap {
+      width: min(760px, 92vw);
+      height: clamp(46px, 8vh, 68px);
+    }
+    #wave { width: 100%; height: 100%; display: block; }
+
+    #user-text {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: rgba(247,247,251,0.32);
+      text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+      min-height: 16px;
+      max-width: 420px;
+      line-height: 1.5;
+    }
+    #user-text.interim { color: rgba(247,247,251,0.18); }
+
+    /* Subtitles, not a transcript.
+       This used to grow without limit: every sentence appended a line that
+       was never removed, so a long reply pushed the centred column past the
+       viewport. With `overflow:hidden` on body and the column centred, that
+       clipped BOTH the start and the end of what she said, with no scrollbar
+       to reveal them — and shifted the wave and button down on every
+       sentence.
+       Now it is a fixed box that reserves its own space. The newest line sits
+       at the bottom, older ones drift up and out. She is speaking; the line
+       being spoken is the one that matters. */
+    #reply-text {
+      font-size: 15px;
+      font-weight: 400;
+      color: rgba(247,247,251,0.62);
+      text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+      max-width: 440px;
+      line-height: 1.6;
+      width: 100%;
+      height: clamp(76px, 12vh, 108px);   /* reserved, so nothing jumps */
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;          /* newest at the bottom */
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+      /* Fade the top edge so a line leaving does not cut off squarely. */
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 100%);
+              mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 100%);
+    }
+    .reply-burst {
+      opacity: 0;
+      animation: burstIn 0.35s ease forwards;
+      transition: opacity .5s ease, transform .5s ease, filter .5s ease;
+      will-change: opacity, transform;
+    }
+    @keyframes burstIn {
+      from { opacity: 0; transform: translateY(6px); filter: blur(3px); }
+      to   { opacity: 1; transform: translateY(0);   filter: blur(0); }
+    }
+    /* Leaving: drift up, soften, go. Removed from the DOM once it lands. */
+    .reply-burst.leaving {
+      opacity: 0;
+      transform: translateY(-10px);
+      filter: blur(2px);
+    }
+    /* The line before the current one stays legible but recedes. */
+    .reply-burst.prev { opacity: 0.45; }
+
+    /* Once she is talking, the user's own line has done its job (confirming
+       she heard correctly) — recede it rather than let it compete. */
+    #user-text { transition: opacity .45s ease; }
+    body.speaking #user-text { opacity: 0.28; }
+
+    /* ── Button ─────────────────────────────────────────── */
+    #session-btn {
+      margin-top: 6px;
+      height: 44px;
+      padding: 0 28px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.067);
+      color: #fff;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .2s, border-color .2s, color .2s;
+    }
+    #session-btn:hover { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.22); }
+    #session-btn.active {
+      border-color: rgba(240,110,110,0.35);
+      background: rgba(240,110,110,0.1);
+      color: #ffb3b3;
+    }
+    #session-btn.active:hover { background: rgba(240,110,110,0.18); }
+
+    /* ── Footer / overlays ─────────────────────────────────── */
+    #latency {
+      position: fixed; bottom: 14px; left: 18px;
+      font-size: 10px; font-family: ui-monospace, monospace;
+      color: rgba(247,247,251,0.2);
+    }
+    #debug-info {
+      position: fixed; bottom: 14px; right: 18px;
+      font-size: 10px; font-family: ui-monospace, monospace;
+      color: rgba(247,247,251,0.2); text-align: right; max-width: 220px;
+    }
+    #debug-info.error { color: rgba(255,110,110,0.75); }
+
+    /* ── AI disclosure badge — persistent, not just at the gate ──── */
+    #ai-badge {
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      color: rgba(247,247,251,0.4);
+      border: 1px solid rgba(247,247,251,0.18);
+      border-radius: 4px;
+      padding: 2px 6px;
+      text-transform: uppercase;
+    }
+
+    /* ── Startup progress ────────────────────────────────────────
+       Shown from "Start Session" until the mic is genuinely live.
+       Stages are real connection milestones, not a timer. */
+    #startup {
+      width: min(420px, 88vw);
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+    }
+    body.connecting #startup { display: flex; }
+    #startup-track {
+      height: 3px;
+      border-radius: 3px;
+      background: rgba(255,255,255,0.1);
+      overflow: hidden;
+    }
+    #startup-bar {
+      height: 100%;
+      width: 0%;
+      border-radius: 3px;
+      background: linear-gradient(to right, #7af0c8, #7ad4f5);
+      transition: width .35s cubic-bezier(.4,0,.2,1);
+    }
+    #startup-label {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: rgba(247,247,251,0.5);
+      text-align: center;
+    }
+    /* While connecting, the waveform and transcript are meaningless. */
+    body.connecting #wave-wrap,
+    body.connecting #user-text { visibility: hidden; }
+
+    /* ── Login ───────────────────────────────────────────────────── */
+    #login-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      background: rgba(5,5,9,0.96);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    #login-overlay[hidden] { display: none; }
+    #login-form { display: flex; flex-direction: column; }
+    .fld {
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(247,247,251,0.5);
+      margin-bottom: 6px;
+    }
+    #login-form input {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #f7f7fb;
+      font-family: inherit;
+      font-size: 14px;
+      margin-bottom: 14px;
+    }
+    #login-form input:focus {
+      outline: none;
+      border-color: rgba(122,240,200,0.5);
+      background: rgba(255,255,255,0.09);
+    }
+    #login-error {
+      color: #ffb3b3;
+      font-size: 13px;
+      margin-bottom: 12px;
+      line-height: 1.45;
+    }
+    #login-error[hidden] { display: none; }
+    #login-submit {
+      height: 42px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(122,240,200,0.16);
+      color: #eafff6;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #login-submit:disabled { opacity: 0.45; cursor: not-allowed; }
+    #login-submit:not(:disabled):hover { background: rgba(122,240,200,0.26); }
+
+    /* ── Consent / age gate ──────────────────────────────────────── */
+    #gate-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      background: rgba(5,5,9,0.94);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    #gate-overlay[hidden] { display: none; }
+    #gate-card {
+      max-width: 420px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px;
+      padding: 28px 26px;
+      text-align: left;
+    }
+    #gate-card h2 {
+      font-size: 17px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    #gate-card p {
+      font-size: 13px;
+      line-height: 1.6;
+      color: rgba(247,247,251,0.72);
+      margin-bottom: 14px;
+    }
+    #gate-check {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 13px;
+      color: rgba(247,247,251,0.85);
+      margin-bottom: 20px;
+      cursor: pointer;
+    }
+    #gate-check input { margin-top: 3px; width: 15px; height: 15px; flex: 0 0 auto; }
+    #gate-continue {
+      width: 100%;
+      height: 42px;
+      border-radius: 9999px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(122,240,200,0.16);
+      color: #eafff6;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    #gate-continue:disabled { opacity: 0.35; cursor: not-allowed; }
+    #gate-continue:not(:disabled):hover { background: rgba(122,240,200,0.26); }
+
+    /* ── Reduced motion ───────────────────────────────────────────
+       Respect the OS-level preference: no autoplay background video,
+       no continuously-animating waveform, no burst-in animation. */
+    /* ── Phones ────────────────────────────────────────────────
+       Nine characters wrap to several rows, so the chips get smaller here
+       rather than eating the whole screen. The column also narrows, which is
+       what actually uncovers the character behind it. */
+    @media (max-width: 640px) {
+      /* Nine stacked buttons plus the wave and subtitles very nearly fills a
+         phone, and mobile browsers hand back less height than innerHeight
+         suggests once the URL bar is showing. Pack tighter, start from the
+         top rather than centring, and allow scrolling as a last resort so a
+         control can never end up unreachable below the fold. */
+      #stage {
+        padding: 8px 16px 10px;
+        gap: 7px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+
+      #status,
+      #headline,
+      #char-desc,
+      #startup { max-width: 100%; }
+
+      #char-picker,
+      #mode-picker { gap: 6px; }
+
+      /* Smaller than the desktop headline: this whole block is a bottom bar
+         now, and every pixel it grows is a pixel taken off the picture. */
+      #headline { font-size: clamp(22px, 6.4vw, 30px); line-height: 1.15; }
+      #char-desc { font-size: 14px; line-height: 1.3; max-width: 100%; }
+      #status { font-size: 10px; }
+
+      .char-chip,
+      .mode-chip {
+        padding: 4px 11px;
+        font-size: 11px;
+        line-height: 1.25;
+      }
+
+      /* Full width — it is the conversation, not a control. */
+      #chat-panel { width: 100%; height: clamp(200px, 38vh, 340px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      /* Shown when a character has no background clip, which is how this kit
+       ships: web/bg/ is empty. The video machinery below is left intact --
+       drop <character-id>.mp4 into web/bg/ and it takes over with a crossfade.
+       A missing clip leaves this in place rather than flashing to black. */
+    body {
+      background:
+        radial-gradient(120% 90% at 50% 0%, #1b2030 0%, #0b0d14 55%, #06070b 100%);
+    }
+
+    .bg-video { display: none; }
+      .reply-burst { animation: none; opacity: 1; transform: none; filter: none; }
+      .reply-burst.leaving { transition: none; }
+    }
+  </style>
+</head>
+<body class="idle">
+
+  <video id="bg-video-a" class="bg-video" autoplay muted loop playsinline preload="auto"></video>
+  <video id="bg-video-b" class="bg-video" autoplay muted loop playsinline preload="auto"></video>
+  <div id="bg-scrim"></div>
+
+  <div id="topbar">
+    <div id="brand">
+      <span id="brand-name">COMPANION</span>
+      <span id="beta-badge">Beta</span>
+      <span id="ai-badge">AI companion · not a real person</span>
+    </div>
+    <div id="topbar-right">
+      <span id="whoami" hidden></span>
+      <button id="logout-btn" type="button" hidden>Sign out</button>
+      <div id="conn-dot" class="down">starting…</div>
+    </div>
+  </div>
+
+  <div id="latency"></div>
+  <div id="debug-info"></div>
+  <div id="error-box" role="alert" aria-live="assertive" style="display:none; position:fixed; top:60px; left:10px; background:rgba(255,50,50,0.95); color:#fff; padding:15px; border-radius:8px; max-width:400px; z-index:9999; font-family:monospace; font-size:12px; line-height:1.4;">
+    <div style="font-weight:bold; margin-bottom:8px;">ERROR DETAILS</div>
+    <div id="error-content"></div>
+    <button onclick="document.getElementById('error-box').style.display='none'" style="margin-top:8px; padding:5px 10px; background:#fff; color:#f00; border:none; border-radius:3px; cursor:pointer;">Close</button>
+  </div>
+
+  <div id="stage">
+    <div id="status" aria-live="polite">ready</div>
+    <div id="headline">Talk to Callie.</div>
+    <!-- Its own row, directly under the title. Kept OUT of #headline: 
+         setCharacterHeadline() assigns headlineEl.textContent, which replaces
+         every child node, so a canvas parented there would be destroyed the
+         first time anyone switched character. -->
+    <div id="wave-wrap" aria-hidden="true"><canvas id="wave"></canvas></div>
+    <div id="char-desc">A single mum who always cares about people</div>
+
+    <div id="char-picker"></div>
+
+    <div id="mode-picker" role="group" aria-label="Input mode">
+      <button class="mode-chip active" data-mode="voice" type="button">Voice</button>
+      <button class="mode-chip"        data-mode="text"  type="button">Text</button>
+    </div>
+
+    <div id="startup" role="status" aria-live="polite">
+      <div id="startup-track"><div id="startup-bar"></div></div>
+      <div id="startup-label">starting…</div>
+    </div>
+
+
+    <div id="chat-panel">
+      <div id="chat-log" role="log" aria-live="polite"></div>
+      <div id="chat-input-row">
+        <button id="voice-toggle" type="button" title="Mute her voice" aria-pressed="false">&#128266;</button>
+        <textarea id="chat-input" rows="1" placeholder="Type to her…"
+                  aria-label="Message" maxlength="4000"></textarea>
+        <button id="chat-send" type="button">Send</button>
+      </div>
+    </div>
+
+    <div id="user-text" aria-live="polite"></div>
+    <div id="reply-text" aria-live="polite"></div>
+
+    <button id="session-btn" aria-pressed="false">Start Session</button>
+  </div>
+
+  <div id="login-overlay" role="dialog" aria-modal="true" aria-labelledby="login-title" hidden>
+    <div id="gate-card">
+      <h2 id="login-title">Sign in</h2>
+      <p>This is a private test build. Sign in to continue.</p>
+      <form id="login-form" autocomplete="on">
+        <label class="fld" for="login-user">Username</label>
+        <input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required />
+        <label class="fld" for="login-pass">Password</label>
+        <input id="login-pass" name="password" type="password" autocomplete="current-password" required />
+        <div id="login-error" role="alert" hidden></div>
+        <button id="login-submit" type="submit">Sign in</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="gate-overlay" role="dialog" aria-modal="true" aria-labelledby="gate-title" hidden>
+    <div id="gate-card">
+      <h2 id="gate-title">Before you continue</h2>
+      <p>She is an AI character, not a real person — every reply is generated. This experience can include AI-generated adult (18+) content and is intended for adults only.</p>
+      <label id="gate-check">
+        <input type="checkbox" id="gate-checkbox" />
+        <span>I am 18 years of age or older and I understand I'm talking with an AI, not a human.</span>
+      </label>
+      <button id="gate-continue" disabled>Continue</button>
+    </div>
+  </div>
+
+<script src="config.js"></script>
+<script>
+const WS_URL       = window.MIA_CONFIG.WS_URL;
+const API_BASE     = window.MIA_CONFIG.API_BASE_URL;
+
+console.log(`[Anteros] config loaded WS_URL=${WS_URL}`);
+if (!WS_URL || !API_BASE) {
+  document.getElementById('debug-info').textContent = 'Config error — check console';
+  document.getElementById('debug-info').className = 'error';
+}
+
+// ── Auth ────────────────────────────────────────────────────
+// The server issues an opaque session token on login. It goes in an
+// Authorization header on normal requests, and as a query param on the
+// WebSocket connect URL (browsers can't set headers on a WS handshake).
+const TOKEN_KEY = 'companion_token_v1';
+let authToken = localStorage.getItem(TOKEN_KEY) || '';
+
+const loginOverlay = document.getElementById('login-overlay');
+const loginForm    = document.getElementById('login-form');
+const loginUser    = document.getElementById('login-user');
+const loginPass    = document.getElementById('login-pass');
+const loginError   = document.getElementById('login-error');
+const loginSubmit  = document.getElementById('login-submit');
+
+function showLoginError(msg) {
+  loginError.textContent = msg;
+  loginError.hidden = false;
+}
+
+function authHeaders() {
+  return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+}
+
+/** Called whenever the server rejects our token — send the user back to login. */
+function handleUnauthorized() {
+  authToken = '';
+  localStorage.removeItem(TOKEN_KEY);
+  history = [];
+  if (sessionActive) endSession();
+  hideSignedIn();
+  gateOverlay.hidden = true;
+  loginOverlay.hidden = false;
+  showLoginError('Your session expired. Please sign in again.');
+}
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  loginError.hidden = true;
+  loginSubmit.disabled = true;
+  loginSubmit.textContent = 'Signing in…';
+  try {
+    const resp = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: loginUser.value, password: loginPass.value }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showLoginError(data.error || `Sign-in failed (${resp.status})`);
+      return;
+    }
+    authToken = data.token;
+    localStorage.setItem(TOKEN_KEY, authToken);
+    loginPass.value = '';
+    loginOverlay.hidden = true;
+    afterAuth();
+  } catch (err) {
+    showLoginError(`Could not reach the server: ${err.message}`);
+  } finally {
+    loginSubmit.disabled = false;
+    loginSubmit.textContent = 'Sign in';
+  }
+});
+
+// ── Age / consent gate ──────────────────────────────────────
+// Required disclosure: the user is talking to an AI, not a person, and the
+// experience can include adult content. Remembered in localStorage so
+// returning users aren't re-gated every visit — the persistent #ai-badge
+// in the topbar covers the "regular disclosure" requirement after this.
+const GATE_CONSENT_KEY = 'companion_gate_consent_v1';
+const gateOverlay  = document.getElementById('gate-overlay');
+const gateCheckbox = document.getElementById('gate-checkbox');
+const gateContinue = document.getElementById('gate-continue');
+
+gateCheckbox.addEventListener('change', () => {
+  gateContinue.disabled = !gateCheckbox.checked;
+});
+gateContinue.addEventListener('click', () => {
+  localStorage.setItem(GATE_CONSENT_KEY, '1');
+  gateOverlay.hidden = true;
+});
+
+/** Runs once the user is authenticated: show the consent gate if needed. */
+function afterAuth() {
+  if (localStorage.getItem(GATE_CONSENT_KEY) !== '1') {
+    gateOverlay.hidden = false;
+  }
+  showSignedIn();
+  loadCharacterPicker();
+}
+
+const whoamiEl = document.getElementById('whoami');
+const logoutBtn = document.getElementById('logout-btn');
+
+/** Reveal the identity + sign-out controls, and fill in who is signed in. */
+function showSignedIn() {
+  logoutBtn.hidden = false;
+  fetch(`${API_BASE}/auth/me`, { headers: authHeaders() })
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => {
+      if (d && d.username) { whoamiEl.textContent = d.username; whoamiEl.hidden = false; }
+    })
+    .catch(() => { /* the name is a nicety — never block on it */ });
+}
+
+function hideSignedIn() {
+  logoutBtn.hidden = true;
+  whoamiEl.hidden = true;
+  whoamiEl.textContent = '';
+}
+
+/**
+ * Sign out. Tells the server to invalidate the token before dropping it
+ * locally — clearing only localStorage would leave a valid token alive on
+ * the server for its full 7-day life.
+ *
+ * The local clear happens regardless of whether that call succeeds: a user
+ * who pressed sign out must end up signed out, even offline.
+ */
+async function signOut() {
+  logoutBtn.disabled = true;
+  try {
+    if (sessionActive) endSession();
+    if (authToken) {
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST', headers: authHeaders() })
+        .catch(e => dbg(`logout call failed (clearing locally anyway): ${e.message}`, true));
+    }
+  } finally {
+    authToken = '';
+    localStorage.removeItem(TOKEN_KEY);
+    history = [];              // never leave one user's conversation for the next
+    hideSignedIn();
+    gateOverlay.hidden = true;
+    loginOverlay.hidden = false;
+    logoutBtn.disabled = false;
+    dbg('signed out');
+  }
+}
+
+logoutBtn.addEventListener('click', signOut);
+
+/** Decide on load whether to show login or go straight in. */
+async function bootstrapAuth() {
+  if (!authToken) {
+    loginOverlay.hidden = false;
+    return;
+  }
+  try {
+    const resp = await fetch(`${API_BASE}/auth/me`, { headers: authHeaders() });
+    if (!resp.ok) throw new Error('token rejected');
+    afterAuth();
+  } catch {
+    authToken = '';
+    localStorage.removeItem(TOKEN_KEY);
+    loginOverlay.hidden = false;
+  }
+}
+
+// ── State ──────────────────────────────────────────────────
+let appState      = 'idle';   // idle | listening | processing | speaking
+let sessionActive = false;
+// The conversation itself now lives server-side, in the UserMemory Durable
+// Object (doc/09 phase 1). The browser no longer sends it: history survived
+// only until a refresh, was re-uploaded in full on every single turn, and was
+// a prompt-injection surface once already.
+//
+// What remains here is display state only — `_lastUser` is what the reply
+// area echoes back while she is answering. Nothing here reaches the model.
+let history       = [];
+let stuckTimer    = null;
+let currentTurnId = 0;        // Change 5: incremented on each new turn + interrupt
+
+// ── Character selection ─────────────────────────────────────
+let selectedCharacter = 'demo';
+const headlineEl   = document.getElementById('headline');
+const charDescEl   = document.getElementById('char-desc');
+const charPickerEl = document.getElementById('char-picker');
+
+/** Whoever is currently selected, by display name. Falls back to the id so
+ *  this never renders "undefined" if /characters has not loaded yet. */
+function currentCharacterName() {
+  const m = /^Talk to (.+)\.$/.exec(headlineEl.textContent || '');
+  return (m && m[1]) || selectedCharacter;
+}
+
+/** Name and description come from the Worker's /characters response. */
+function setCharacterHeadline(name, desc) {
+  headlineEl.textContent = `Talk to ${name}.`;
+  // textContent, never innerHTML — this string comes off the network.
+  charDescEl.textContent = desc || '';
+}
+
+// ── Per-character background video ──────────────────────────
+// Two layers, crossfaded. The incoming clip is loaded into the hidden
+// layer and only faded up once it reports it can play, so a slow load
+// never leaves the user staring at a black screen mid-transition.
+// Declared here rather than beside the waveform code because the background
+// needs it too, and it must exist before the first setBackgroundVideo call.
+const REDUCED_MOTION = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const BG_VIDEO_DIR = 'bg';
+const bgLayers = [document.getElementById('bg-video-a'), document.getElementById('bg-video-b')];
+let bgActive = 0;            // index of the layer currently visible
+let bgCurrentSrc = '';
+
+function bgSrcFor(characterId) {
+  // Filenames match character ids exactly — see dist/bg/.
+  return `${BG_VIDEO_DIR}/${characterId}.mp4`;
+}
+
+function setBackgroundVideo(characterId) {
+  if (REDUCED_MOTION) return;              // user asked for no motion
+  const src = bgSrcFor(characterId);
+  if (src === bgCurrentSrc) return;        // already showing this one
+  bgCurrentSrc = src;
+
+  const incoming = bgLayers[1 - bgActive];
+  const outgoing = bgLayers[bgActive];
+
+  let settled = false;
+  const reveal = () => {
+    if (settled) return;
+    settled = true;
+    incoming.play().catch(() => {});       // autoplay can reject before interaction
+    incoming.classList.add('showing');
+    outgoing.classList.remove('showing');
+    bgActive = 1 - bgActive;
+    dbg(`background → ${characterId}`);
+  };
+
+  incoming.addEventListener('canplay', reveal, { once: true });
+  incoming.addEventListener('error', () => {
+    // A missing or broken clip should leave the current background alone
+    // rather than fading to black.
+    settled = true;
+    dbg(`background video failed: ${src}`, true);
+  }, { once: true });
+
+  incoming.src = src;
+  incoming.load();
+
+  // Safety net: if canplay never fires (some browsers withhold it for a
+  // hidden element), show it anyway rather than stranding the transition.
+  setTimeout(reveal, 2500);
+}
+
+// Start the default background immediately, before login — otherwise the
+// sign-in screen sits on a black page while the picker waits on auth.
+setBackgroundVideo(selectedCharacter);
+
+async function loadCharacterPicker() {
+  let chars;
+  try {
+    const resp = await fetch(`${API_BASE}/characters`);
+    if (!resp.ok) throw new Error(`characters endpoint ${resp.status}`);
+    chars = await resp.json();
+  } catch (e) {
+    dbg(`Could not load character list: ${e.message}`, true);
+    return;   // falls back to selectedCharacter='demo', no picker shown
+  }
+
+  charPickerEl.innerHTML = '';
+  Object.entries(chars).forEach(([id, info]) => {
+    const btn = document.createElement('button');
+    btn.className   = 'char-chip' + (id === selectedCharacter ? ' active' : '');
+    btn.textContent = info.name;
+    btn.setAttribute('aria-pressed', id === selectedCharacter ? 'true' : 'false');
+    btn.addEventListener('click', () => {
+      selectedCharacter = id;
+      charPickerEl.querySelectorAll('.char-chip').forEach(c => {
+        c.classList.remove('active');
+        c.setAttribute('aria-pressed', 'false');
+      });
+      btn.classList.add('active');
+      btn.setAttribute('aria-pressed', 'true');
+      setCharacterHeadline(info.name, info.desc);
+      setBackgroundVideo(id);
+    });
+    charPickerEl.appendChild(btn);
+  });
+
+  // Reflect whichever character is selected on arrival (Callie by default).
+  const current = chars[selectedCharacter];
+  if (current) setCharacterHeadline(current.name, current.desc);
+  setBackgroundVideo(selectedCharacter);
+}
+
+// Connections / resources
+let orchestratorWS   = null;
+let dgWS              = null;
+let micStream         = null;
+let mediaRecorder     = null;
+let audioCtx          = null;
+let analyser          = null;    // mic input (listening)
+let playbackAnalyser  = null;    // her voice output (speaking)
+let currentSource     = null;
+
+// DOM
+const statusEl   = document.getElementById('status');
+const userTextEl = document.getElementById('user-text');
+const replyEl    = document.getElementById('reply-text');
+const sessionBtn = document.getElementById('session-btn');
+const connDot    = document.getElementById('conn-dot');
+const latencyEl  = document.getElementById('latency');
+const debugEl    = document.getElementById('debug-info');
+
+// Bump on any change to the timing code. Sent on the WebSocket URL and
+// logged server-side, so a stale cached page is visible in the logs rather
+// than looking like a broken feature.
+const CLIENT_BUILD = 'kit-0.1.0';
+
+// ── Turn timing (phase 0) ───────────────────────────────────
+// Measures the legs the Worker cannot see. All marks come from one clock
+// (performance.now) so the deltas are real; server timings are reported
+// separately and never subtracted from these, because there is no shared
+// time base between the browser and the Worker.
+//
+// The leg that matters most and was invisible until now: `endpoint` — the
+// silence Deepgram waits through (utterance_end_ms) before it will admit
+// the user stopped talking. It is dead air to the user and it is ours to
+// tune, not the API's.
+// The first sound plays as soon as chunk 0 arrives, but the server's own
+// breakdown only arrives later with tts_done. So the report waits for both
+// and fires once, from whichever lands last.
+const turnTiming = {
+  lastFinal: 0, utteranceEnd: 0, sent: 0, firstAudioRecv: 0, firstSound: 0,
+  server: null, reported: false,
+
+  markFinalChunk() { this.lastFinal = performance.now(); },
+  markUtteranceEnd() {
+    this.utteranceEnd = performance.now();
+    this.sent = this.firstAudioRecv = this.firstSound = 0;
+    this.server = null;
+    this.reported = false;
+  },
+  markSent()      { this.sent = performance.now(); },
+  markAudioRecv() { if (!this.firstAudioRecv) this.firstAudioRecv = performance.now(); },
+  markFirstSound(){ if (!this.firstSound) { this.firstSound = performance.now(); this.report(); } },
+  markServer(t)   { this.server = t; this.report(); },
+
+  report() {
+    if (this.reported || !this.utteranceEnd || !this.firstSound || !this.server) return;
+    this.reported = true;
+    const ms = n => Math.round(n);
+    const endpoint  = this.lastFinal ? ms(this.utteranceEnd - this.lastFinal) : null;
+    const uplink    = this.sent ? ms(this.sent - this.utteranceEnd) : null;
+    const roundTrip = this.sent && this.firstAudioRecv ? ms(this.firstAudioRecv - this.sent) : null;
+    const decode    = this.firstAudioRecv ? ms(this.firstSound - this.firstAudioRecv) : null;
+    const afterStop = ms(this.firstSound - this.utteranceEnd);
+    const perceived = endpoint !== null ? endpoint + afterStop : null;
+    const s = this.server || {};
+
+    // Server-side breakdown of the round trip, from the Worker's own clock.
+    const srv = s.first_audio_ms != null
+      ? `      server: ttft ${s.ttft_ms}ms → 1st sentence ${s.first_sentence_ms}ms → 1st audio ${s.first_audio_ms}ms (tts ${s.tts_first_chunk_ms}ms)`
+      : '';
+
+    console.log(
+      `[timing] PERCEIVED ${perceived ?? '?'}ms  =  endpointing ${endpoint ?? '?'}ms  +  response ${afterStop}ms\n` +
+      `         uplink ${uplink ?? '?'}ms | worker round-trip ${roundTrip ?? '?'}ms | decode+start ${decode ?? '?'}ms\n` + srv
+    );
+    latencyEl.textContent =
+      `perceived ${perceived ?? '?'}ms (silence ${endpoint ?? '?'} + reply ${afterStop})`;
+    dbg(`timing perceived=${perceived}ms endpoint=${endpoint}ms response=${afterStop}ms`);
+
+    // Ship the client-measured legs back so the whole turn lands in one
+    // server-side log stream, instead of half of it living in a console
+    // nobody is watching.
+    if (orchestratorWS && orchestratorWS.readyState === WebSocket.OPEN) {
+      orchestratorWS.send(JSON.stringify({
+        type: 'client_timing',
+        timing: {
+          perceived_ms:   perceived ?? -1,
+          endpointing_ms: endpoint ?? -1,
+          after_stop_ms:  afterStop,
+          uplink_ms:      uplink ?? -1,
+          round_trip_ms:  roundTrip ?? -1,
+          decode_ms:      decode ?? -1,
+          srv_ttft_ms:          s.ttft_ms ?? -1,
+          srv_first_sentence_ms: s.first_sentence_ms ?? -1,
+          srv_first_audio_ms:    s.first_audio_ms ?? -1,
+          srv_tts_first_chunk_ms: s.tts_first_chunk_ms ?? -1,
+        },
+      }));
+    }
+  },
+};
+
+// ── Reply rendering — bursts, not one flowing paragraph ─────
+// Each sentence-sized chunk from the server becomes its own line, the way
+// a person sends a few short texts instead of one essay. See
+// CHANGELOG.md "presentation-layer chunking".
+function clearReply() {
+  replyEl.innerHTML = '';
+}
+function setReplyMessage(text) {
+  replyEl.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'reply-burst';
+  div.textContent = text;
+  replyEl.appendChild(div);
+}
+// How many lines stay on screen: the one being spoken, plus the one before
+// it for continuity. Everything older animates out and is removed.
+const SUBTITLE_KEEP = 2;
+
+function appendReplyBurst(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const div = document.createElement('div');
+  div.className = 'reply-burst';
+  div.textContent = trimmed;
+  replyEl.appendChild(div);
+  retireOldBursts();
+}
+
+/**
+ * Age out anything past SUBTITLE_KEEP. The exit is a transition rather than
+ * an animation so the element can be removed exactly when it finishes —
+ * leaving them in the DOM invisible would slowly fill the box with dead
+ * nodes over a long conversation.
+ */
+function retireOldBursts() {
+  const live = [...replyEl.querySelectorAll('.reply-burst:not(.leaving)')];
+  live.forEach((el, i) => el.classList.toggle('prev', i === live.length - SUBTITLE_KEEP));
+  const excess = live.slice(0, Math.max(0, live.length - SUBTITLE_KEEP));
+  for (const el of excess) {
+    el.classList.remove('prev');
+    el.classList.add('leaving');
+    // Belt and braces: transitionend does not fire if the element is never
+    // painted (hidden tab, reduced motion), so a timer guarantees cleanup.
+    const drop = () => el.remove();
+    el.addEventListener('transitionend', drop, { once: true });
+    setTimeout(drop, 900);
+  }
+}
+
+// ── Text mode ───────────────────────────────────────────────
+// The backend is already text-in/text-out — STT is only a way of producing
+// the user's string. So text mode changes the INPUT path and nothing else:
+// the same { message, history } goes over the same WebSocket.
+//
+// It skips the microphone and Deepgram entirely, which also means no STT
+// token, no endpointing wait, and no reconnect logic to go wrong.
+let inputMode  = 'voice';   // 'voice' | 'text'
+let voiceMuted = false;     // text mode only — she still speaks by default
+let herBubble  = null;      // the bubble being streamed into this turn
+
+const modePicker  = document.getElementById('mode-picker');
+const chatLog     = document.getElementById('chat-log');
+const chatInput   = document.getElementById('chat-input');
+const chatSend    = document.getElementById('chat-send');
+const voiceToggle = document.getElementById('voice-toggle');
+
+function setInputMode(mode) {
+  inputMode = mode === 'text' ? 'text' : 'voice';
+  setState(appState);          // rebuilds body classes from the new mode
+  [...modePicker.querySelectorAll('.mode-chip')].forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === inputMode));
+  sessionBtn.textContent = sessionActive ? 'End Session'
+                         : (inputMode === 'text' ? 'Start Chat' : 'Start Session');
+}
+modePicker.addEventListener('click', e => {
+  const chip = e.target.closest('.mode-chip');
+  if (chip && !sessionActive) setInputMode(chip.dataset.mode);
+});
+
+function addChatMessage(text, who, pending) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who + (pending ? ' pending' : '');
+  div.textContent = text;
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return div;
+}
+
+/** Append a streamed sentence into her current bubble, creating it if needed. */
+function appendToHerBubble(text) {
+  const t = text.trim();
+  if (!t) return;
+  // Stick to the bottom only if the user is already there — never yank the
+  // view away from someone who has scrolled up to re-read something.
+  const atBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 40;
+  if (!herBubble) herBubble = addChatMessage('', 'her');
+  herBubble.textContent = (herBubble.textContent ? herBubble.textContent + ' ' : '') + t;
+  if (atBottom) chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function autoGrowInput() {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 96) + 'px';
+}
+
+function sendTypedMessage() {
+  const text = chatInput.value.trim();
+  if (!text || !sessionActive) return;
+  if (!orchestratorWS || orchestratorWS.readyState !== WebSocket.OPEN) {
+    addChatMessage('Not connected — please wait…', 'her', true);
+    return;
+  }
+  // Interrupt her if she is still talking, exactly as barge-in does by voice.
+  if (appState === 'speaking' || appState === 'processing') {
+    orchestratorWS.send(JSON.stringify({ type: 'interrupt' }));
+    audioQueue.reset();
+  }
+
+  addChatMessage(text, 'user');
+  chatInput.value = '';
+  autoGrowInput();
+
+  history._lastUser = text;
+  herBubble = null;
+  currentTurnId++;
+  setState('processing');
+  armStuckTimer();
+  orchestratorWS.send(JSON.stringify({ message: text }));
+  chatSend.disabled = true;
+}
+
+chatSend.addEventListener('click', sendTypedMessage);
+chatInput.addEventListener('input', autoGrowInput);
+chatInput.addEventListener('keydown', e => {
+  // Enter sends, Shift+Enter is a newline — the convention everywhere else.
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTypedMessage(); }
+});
+voiceToggle.addEventListener('click', () => {
+  voiceMuted = !voiceMuted;
+  voiceToggle.classList.toggle('muted', voiceMuted);
+  voiceToggle.setAttribute('aria-pressed', String(voiceMuted));
+  voiceToggle.title = voiceMuted ? 'Unmute her voice' : 'Mute her voice';
+  voiceToggle.innerHTML = voiceMuted ? '&#128263;' : '&#128266;';
+  if (voiceMuted) audioQueue.reset();
+});
+
+/** Text mode's equivalent of resumeListening — hand the turn back to the user. */
+function readyForTyping() {
+  if (!sessionActive) return;
+  clearStuckTimer();
+  setState('idle');
+  chatSend.disabled = false;
+  chatInput.focus();
+}
+
+// Accumulates finalized transcript segments during 'listening' until
+// Deepgram's UtteranceEnd fires — see openDeepgramWS() for why.
+let finalizedBuffer = '';
+
+// ── Timing helper ──────────────────────────────────────────
+let _turnStart = 0;
+function tms() { return _turnStart ? `+${Math.round(performance.now()-_turnStart)}ms` : '--'; }
+
+function dbg(msg, isError) {
+  const ts = new Date().toTimeString().slice(0,8);
+  console.log(`[mia ${ts} ${tms()}] ${msg}`);
+  debugEl.textContent = msg;
+  debugEl.className   = isError ? 'error' : '';
+}
+
+function showError(title, detail) {
+  document.getElementById('error-content').innerHTML =
+    `<div style="color:#ffff00;margin-bottom:8px"><strong>${escapeHtml(title)}</strong></div><div>${escapeHtml(detail)}</div>`;
+  document.getElementById('error-box').style.display = 'block';
+  console.error(`[ERROR] ${title}: ${detail}`);
+  dbg(`ERROR: ${title}`, true);
+}
+
+function escapeHtml(t) {
+  return String(t).replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+}
+
+const STATUS_LABELS = {
+  idle:'ready', connecting:'connecting...', listening:'listening...',
+  processing:'thinking...', speaking:'speaking',
+};
+
+// ── Startup progress ────────────────────────────────────────
+// Real connection milestones, not a fake timer. The last step only
+// completes once audio is actually flowing to Deepgram — before this
+// existed the UI said "listening" while the recorder hadn't started,
+// so the first words of a session could be silently dropped.
+const STARTUP_STEPS = [
+  'starting audio',
+  'connecting',
+  'microphone access',
+  'getting voice key',
+  'opening speech channel',
+  'ready',
+];
+const startupBar   = document.getElementById('startup-bar');
+const startupLabel = document.getElementById('startup-label');
+
+function setStartupStep(i) {
+  const pct = Math.round((i / (STARTUP_STEPS.length - 1)) * 100);
+  startupBar.style.width = pct + '%';
+  startupLabel.textContent = STARTUP_STEPS[i] + '…';
+  dbg(`startup ${i}/${STARTUP_STEPS.length - 1}: ${STARTUP_STEPS[i]}`);
+}
+function setState(s) {
+  appState = s;
+  // Rebuild the whole className, but from ALL the state — not just the
+  // turn state. A bare `className = s` silently dropped `textmode`, so the
+  // first setState() of a text session deleted the class every text-mode
+  // style keys off and the voice UI came back. That is why text mode had
+  // never worked in a real session.
+  //
+  // `insession` exists because `:not(.idle)` was being used to mean "a
+  // session is running", which is false in text mode: readyForTyping()
+  // parks the turn state at 'idle' while the conversation is very much
+  // live. Session-ness and turn state are two different things.
+  document.body.className =
+    s
+    + (inputMode === 'text' ? ' textmode' : '')
+    + (sessionActive ? ' insession' : '');
+  statusEl.textContent = STATUS_LABELS[s] || s;
+}
+
+// ── Watchdog ───────────────────────────────────────────────
+function armStuckTimer() {
+  clearStuckTimer();
+  // 120s watchdog — safety net for genuine stuck states (WS drop, decode error, etc.)
+  // Must be long enough to cover the longest possible audio playback:
+  // Fish Audio MP3 @128kbps: avg ~60KB/sentence × 10 sentences = 600KB = 37.5s audio
+  // + server processing (~5s) + buffer → 120s is safely above any real response.
+  stuckTimer = setTimeout(() => {
+    if (sessionActive && appState !== 'listening' && appState !== 'idle') {
+      dbg('watchdog: force-resuming after 120s', true);
+      audioQueue.reset();
+      resumeListening();
+    }
+  }, 120000);
+}
+function clearStuckTimer() {
+  if (stuckTimer) { clearTimeout(stuckTimer); stuckTimer = null; }
+}
+
+// ── Web Audio playback ─────────────────────────────────────
+async function decodeAndPlay(b64) {
+  if (!audioCtx || audioCtx.state === 'closed') throw new Error('AudioContext not ready');
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+  let binary;
+  try { binary = atob(b64); } catch(e) { throw new Error(`b64 decode: ${e.message}`); }
+
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  dbg(`decoding ${(bytes.length/1024).toFixed(1)}KB…`);
+
+  let audioBuf;
+  try { audioBuf = await audioCtx.decodeAudioData(bytes.buffer.slice(0)); }
+  catch(e) { throw new Error(`decodeAudioData: ${e.message}`); }
+
+  dbg(`playing ${audioBuf.duration.toFixed(1)}s`);
+  return new Promise((resolve, reject) => {
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuf;
+    src.connect(playbackAnalyser || audioCtx.destination);
+    src.onended = () => { currentSource = null; resolve(); };
+    src.onerror = (e) => { currentSource = null; reject(e); };
+    currentSource = src;
+    src.start(0);
+    turnTiming.markFirstSound();
+  });
+}
+
+// ── Ordered audio queue ────────────────────────────────────
+const audioQueue = {
+  pending:{}, nextPlay:0, isPlaying:false, turnDone:false,
+
+  reset() {
+    // Also silences a greeting still playing — reset() runs at the start of
+    // every turn, on interrupt, and on session end, which is exactly when
+    // she should stop mid-pleasantry.
+    stopGreeting();
+    if (currentSource) { try { currentSource.stop(); } catch{} currentSource = null; }
+    this.pending = {}; this.nextPlay = 0; this.isPlaying = false; this.turnDone = false;
+  },
+
+  add(index, b64) {
+    this.pending[index] = b64 || null;
+    if (!b64) dbg(`chunk ${index}: TTS failed`, true);
+    else dbg(`chunk ${index}: ${(b64.length*.75/1024).toFixed(1)}KB`);
+    this._tryPlay();
+  },
+
+  markTurnDone() { this.turnDone = true; this._tryPlay(); },
+
+  _tryPlay() {
+    if (this.isPlaying) return;
+    // Text mode with the voice muted never receives audio, so the queue
+    // would otherwise never reach its "turn finished" branch.
+    if (inputMode === 'text' && voiceMuted) {
+      if (this.turnDone && sessionActive) readyForTyping();
+      return;
+    }
+    while (this.nextPlay in this.pending && this.pending[this.nextPlay] === null) {
+      delete this.pending[this.nextPlay++];
+    }
+    if (!(this.nextPlay in this.pending)) {
+      if (this.turnDone && Object.keys(this.pending).length === 0 && sessionActive)
+        resumeListening();
+      return;
+    }
+    const b64 = this.pending[this.nextPlay];
+    delete this.pending[this.nextPlay++];
+    this.isPlaying = true;
+    setState('speaking');
+    decodeAndPlay(b64)
+      .then(() => { dbg('chunk done ✓'); this.isPlaying = false; this._tryPlay(); })
+      .catch(err => {
+        dbg(`playback error: ${err.message}`, true);
+        showError('Audio Playback Error', err.message);
+        this.isPlaying = false; this._tryPlay();
+      });
+  },
+};
+
+// ── Startup greeting ───────────────────────────────────────
+// She says something while the loading bar runs, instead of the app
+// starting in silence. The line is canned and picked by the Worker from
+// greetings_<character>.txt, so it makes no LLM call: it cannot be slow and
+// it cannot drift out of character.
+//
+// It deliberately does NOT go through audioQueue. The queue is the turn
+// machinery — it carries turn ids, drives the speaking state, and calls
+// resumeListening() when it drains. A greeting borrowing any of that would
+// race the startup sequence it exists to cover.
+//
+// The other half of the problem — turn 1 being slow because the OpenRouter
+// route is cold — is a separate mechanism, warmLlmRoute() on the server. A
+// canned line never touches OpenRouter, so it cannot warm anything, and an
+// LLM-generated greeting would put a cold multi-second TTFT on the critical
+// path instead. See doc/14-latency.md.
+const GREETING_MEMORY = 3;    // recent lines to rule out, per character
+
+let greetingPending = false;  // this session still owes the user a greeting
+let greetingPlaying = false;  // her voice is in the room right now
+let greetingSource  = null;   // so a real turn can cut her off mid-word
+let greetingText    = '';     // shown when playback starts, not before
+
+function greetingMemoryKey() { return `companion.greeting.recent.${selectedCharacter}`; }
+
+/**
+ * Which greetings this browser heard most recently for the selected
+ * character. Ten lines picked uniformly repeat inside about four sessions,
+ * and a companion that opens with the same sentence twice in a week reads
+ * as a machine — the same lesson as the few-shot parroting incident.
+ */
+function recentGreetings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(greetingMemoryKey()) || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(n => Number.isInteger(n) && n >= 0).slice(0, GREETING_MEMORY);
+  } catch { return []; }
+}
+
+function rememberGreeting(idx) {
+  if (!Number.isInteger(idx)) return;
+  try {
+    const next = [idx, ...recentGreetings().filter(n => n !== idx)].slice(0, GREETING_MEMORY);
+    localStorage.setItem(greetingMemoryKey(), JSON.stringify(next));
+  } catch { /* private mode — a repeated greeting isn't worth an error */ }
+}
+
+/**
+ * Ask for the greeting. Fires on the first socket open of a session only:
+ * a mid-session reconnect gets a brand-new Durable Object server-side, so
+ * without this flag a dropped connection would make her greet all over
+ * again in the middle of a conversation.
+ */
+function requestGreeting() {
+  if (!greetingPending) return;
+  if (!orchestratorWS || orchestratorWS.readyState !== WebSocket.OPEN) return;
+  const exclude = recentGreetings();
+  greetingPending = false;
+  orchestratorWS.send(JSON.stringify({ type: 'greeting', exclude }));
+  dbg(`greeting requested (excluding ${exclude.join(',') || 'nothing'})`);
+}
+
+/** Cut her off — a real turn started, or the session ended. */
+function stopGreeting() {
+  if (greetingSource) { try { greetingSource.stop(); } catch{} greetingSource = null; }
+  greetingPlaying = false;
+}
+
+/**
+ * Play the greeting on its own, outside the turn queue. Every failure path
+ * here is silent: the user never asked for this, so a session that starts
+ * without a greeting is just a session, while one that refuses to start
+ * over a missing pleasantry is a bug.
+ */
+async function playGreeting(b64) {
+  if (!sessionActive || !b64) return;
+  if (inputMode === 'text' && voiceMuted) return;      // text already shown
+  if (!audioCtx || audioCtx.state === 'closed') { dbg('greeting: no audio context', true); return; }
+  try {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const buf = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+    if (!sessionActive) return;
+    // The user got a word in first. A real turn always wins: currentTurnId
+    // is 0 until the session's first turn, so this also covers slow TTS
+    // arriving after she has already answered something — a greeting
+    // landing mid-conversation is worse than no greeting at all.
+    if (currentTurnId > 0 || audioQueue.isPlaying) {
+      dbg('greeting: a real turn started first — dropped');
+      return;
+    }
+    greetingPlaying = true;
+    if (inputMode !== 'text' && greetingText) setReplyMessage(greetingText);
+    dbg(`greeting playing (${buf.duration.toFixed(1)}s)`);
+    await new Promise(resolve => {
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(playbackAnalyser || audioCtx.destination);
+      src.onended = resolve;
+      greetingSource = src;
+      src.start(0);
+    });
+  } catch (e) {
+    dbg(`greeting playback failed: ${e.message}`, true);
+  } finally {
+    greetingSource = null;
+    greetingPlaying = false;
+    // Whatever the mic caught around the edges of her own voice is not the
+    // user talking. Drop it rather than let it become turn 1.
+    finalizedBuffer = '';
+    if (appState === 'listening') userTextEl.textContent = '';
+  }
+}
+
+// ── Change 5: Interrupt ────────────────────────────────────
+// Called when the user speaks while she is speaking.
+// Stops her mid-sentence and immediately sends the new transcript.
+function _triggerInterrupt(transcript) {
+  dbg(`interrupt → turn_id=${currentTurnId + 1} "${transcript.slice(0,30)}"`);
+  audioQueue.reset();
+  clearReply();
+  userTextEl.textContent = `"${transcript}"`;
+  history._lastUser      = transcript;
+  _turnStart             = performance.now();
+  currentTurnId++;
+  armStuckTimer();
+
+  if (!orchestratorWS || orchestratorWS.readyState !== WebSocket.OPEN) {
+    resumeListening();
+    return;
+  }
+  // Tell server to cancel current turn, then immediately send new message
+  orchestratorWS.send(JSON.stringify({ type: 'interrupt' }));
+  orchestratorWS.send(JSON.stringify({ message: transcript }));
+  setState('processing');
+}
+
+// ── Orchestrator WebSocket ─────────────────────────────────
+// Exponential backoff on reconnect (1s → 2s → 4s ... capped at 15s) so a
+// real outage doesn't turn into a tight retry loop against our own Worker.
+// Resets to the base delay as soon as a connection actually succeeds.
+let orchReconnectDelay = 1000;
+const ORCH_RECONNECT_MAX_MS = 15000;
+
+/**
+ * Opens the orchestrator socket. Returns a promise resolving on first open
+ * so startSession can wait for it — reconnects call this too and simply
+ * ignore the returned promise.
+ */
+function connectOrchestrator() {
+  // Token travels as a query param here — a browser cannot set custom
+  // headers on a WebSocket handshake.
+  // build= identifies which frontend build a session is actually running.
+  // Without it, a stale cached page is indistinguishable from a broken
+  // feature — which cost one measurement session already.
+  const wsUrl = `${WS_URL}?character=${encodeURIComponent(selectedCharacter)}`
+              + `&token=${encodeURIComponent(authToken)}`
+              + `&build=${encodeURIComponent(CLIENT_BUILD)}`;
+  orchestratorWS = new WebSocket(wsUrl);
+
+  let wsEverOpened = false;
+  let markOpen = () => {};
+  const openedPromise = new Promise(resolve => { markOpen = resolve; });
+
+  orchestratorWS.onopen = () => {
+    wsEverOpened = true;
+    connDot.textContent = 'connected';
+    connDot.className   = 'live';
+    orchReconnectDelay = 1000;
+    markOpen();
+    // Earliest possible moment — the greeting exists to cover the rest of
+    // the startup sequence, so every millisecond it waits is dead air.
+    requestGreeting();
+  };
+  orchestratorWS.onclose = () => {
+    connDot.textContent = 'disconnected';
+    connDot.className   = 'down';
+    // Closing without ever opening usually means the server refused the
+    // handshake — an expired token is the likely cause. Verify before
+    // retrying, so an expired session doesn't become a reconnect loop.
+    if (sessionActive && !wsEverOpened) {
+      fetch(`${API_BASE}/auth/me`, { headers: authHeaders() })
+        .then(r => { if (r.status === 401) handleUnauthorized(); })
+        .catch(() => {});
+    }
+    if (sessionActive) {
+      // Reset any in-flight audio — chunks from the dead connection will never arrive
+      audioQueue.reset();
+      clearStuckTimer();
+      resumeListening();
+      setTimeout(connectOrchestrator, orchReconnectDelay);
+      orchReconnectDelay = Math.min(orchReconnectDelay * 2, ORCH_RECONNECT_MAX_MS);
+    }
+  };
+  orchestratorWS.onerror = () => {
+    showError('WebSocket Error', `Cannot reach orchestrator at ${WS_URL}`);
+  };
+
+  orchestratorWS.onmessage = evt => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch { return; }
+
+    switch (msg.type) {
+
+      case 'text_delta':
+        if (appState === 'processing' || appState === 'speaking')
+          if (inputMode === 'text') appendToHerBubble(msg.text);
+          else appendReplyBurst(msg.text);
+        dbg(`text_delta: "${msg.text.trim().slice(0,30)}"`);
+        break;
+
+      case 'greeting_text':
+        greetingText = msg.text || '';
+        // Remembered on arrival rather than after playback: a line we tried
+        // and failed to speak is still one worth varying away from.
+        rememberGreeting(msg.index);
+        dbg(`greeting_text[${msg.index}]: "${greetingText.slice(0, 40)}"`);
+        // Text mode is text-first, so show it as soon as it lands. Voice
+        // mode holds it until the audio starts, so subtitle and voice
+        // arrive together rather than the words leading the sound.
+        if (inputMode === 'text' && greetingText) {
+          addChatMessage(greetingText, 'her');
+          herBubble = null;   // her first real reply gets a fresh bubble
+        }
+        break;
+
+      case 'greeting_audio':
+        playGreeting(msg.data);
+        break;
+
+      case 'greeting_failed':
+        dbg('greeting unavailable — starting silent', true);
+        break;
+
+      case 'audio_chunk': {
+        // Change 5: ignore audio from a previous (interrupted) turn
+        if (msg.turn_id !== undefined && msg.turn_id !== currentTurnId) {
+          dbg(`audio_chunk[${msg.index}] stale turn_id=${msg.turn_id} — ignored`);
+          break;
+        }
+        const kb = msg.data ? (msg.data.length*.75/1024).toFixed(1) : '0';
+        dbg(`audio_chunk[${msg.index}] ${kb}KB tts=${msg.tts_ms??'?'}ms${msg.error?' ERR':''}`)
+        if (msg.index === 0) turnTiming.markAudioRecv();
+        // Muted text mode: drop the audio rather than decode it. Nothing is
+        // waiting on it, and decoding it only to discard it wastes work.
+        if (sessionActive && !(inputMode === 'text' && voiceMuted)) audioQueue.add(msg.index, msg.data);
+        break;
+      }
+
+      case 'response_end':
+        // LLM done — update history + latency display.
+        // Do NOT call markTurnDone() here; wait for tts_done.
+        // Kept for the on-screen echo only; the server keeps the real record.
+        history.push({ role:'user',      content: history._lastUser || '' });
+        history.push({ role:'assistant', content: msg.reply });
+        if (history.length > 40) history = history.slice(-40);
+        latencyEl.textContent = `llm ${msg.latency_ms}ms  ttft ${msg.ttft_ms??'?'}ms`;
+        dbg(`response_end llm=${msg.latency_ms}ms ttft=${msg.ttft_ms??'?'}ms`);
+        break;
+
+      case 'tts_done':
+        // All TTS chunks sent — safe to mark queue as complete
+        dbg(`tts_done tts=${msg.tts_ms??'?'}ms sentences=${msg.sentences??'?'}`);
+        if (msg.timing) turnTiming.markServer(msg.timing);
+        // A completed turn proves the whole chain works, so it clears the
+        // Deepgram failure streak. Counting only uptime was wrong: if the
+        // STT socket churns between turns while conversation still works,
+        // the streak creeps to the give-up threshold and kills a session
+        // that was fine. Give up only on repeated failure with no progress.
+        dgFailStreak = 0;
+        audioQueue.markTurnDone();
+        break;
+
+      case 'interrupted':
+        // Server confirmed cancel — new turn message already sent
+        dbg('server: interrupted ✓');
+        break;
+
+      case 'error': {
+        const det = msg.detail || 'Unknown server error';
+        console.error('[orch]', det);
+        setReplyMessage('⚠ Error');
+        showError('Server Error', det);
+        dbg('server error: ' + det, true);
+        audioQueue.reset();
+        resumeListening();
+        break;
+      }
+    }
+  };
+
+  return openedPromise;
+}
+
+// ── Deepgram streaming STT ─────────────────────────────────
+// Same exponential-backoff treatment as the orchestrator WS above.
+let dgReconnectDelay = 1000;
+const DG_RECONNECT_MAX_MS = 15000;
+// A connection must stay up this long before its retry backoff is reset.
+// Without this, an open-then-immediately-close socket loops at 1s forever.
+const DG_STABLE_MS = 10000;
+// Consecutive failed reconnects before giving up and telling the user,
+// instead of hammering the token endpoint indefinitely.
+const DG_MAX_FAILS = 8;
+let dgStableTimer = null;
+let dgFailStreak = 0;
+let dgOpenedAt = 0;
+
+/**
+ * Send a diagnostic event to the Worker so it lands in the server log.
+ * Numbers go in `fields`; one short free-text `note` is allowed. Never
+ * reaches the model — the Worker logs it and nothing else.
+ */
+function reportClientEvent(name, fields, note) {
+  try {
+    if (!orchestratorWS || orchestratorWS.readyState !== WebSocket.OPEN) return;
+    orchestratorWS.send(JSON.stringify({
+      type: 'client_event', name: String(name).slice(0, 40),
+      fields: fields || {}, note: note ? String(note).slice(0, 120) : undefined,
+    }));
+  } catch { /* diagnostics must never break a turn */ }
+}
+
+// (Mic acquisition now lives inline in startSession() so each stage can
+// advance the startup progress bar as it completes. Change 2 (AEC): echo
+// cancellation filters her speaker output from the mic, enabling
+// interrupt detection without feeding her voice back to Deepgram.)
+
+/**
+ * Opens the Deepgram socket. Resolves once the recorder is actually running,
+ * so the caller knows audio is genuinely flowing. Rejects if the session ends
+ * or setup fails, so startSession can surface it rather than hanging.
+ */
+async function openDeepgramWS(onTokenFetched) {
+  if (!sessionActive) throw new Error('session ended');
+
+  // Enforce one-recorder-per-connection: stop old recorder before opening new socket
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  mediaRecorder = null;
+
+  let dgToken, dgAuth = 'bearer';
+  try {
+    dbg('Fetching STT token…');
+    const resp = await fetch(`${API_BASE}/deepgram-token`, { headers: authHeaders() });
+    if (resp.status === 401) { handleUnauthorized(); throw new Error('unauthorized'); }
+    if (!resp.ok) throw new Error(`token endpoint ${resp.status}`);
+    const tok = await resp.json();
+    // `auth` says which WebSocket subprotocol Deepgram expects. The Worker
+    // now issues a short-lived access token ("bearer"); it used to create a
+    // real API key ("token") per connection, which hit Deepgram's daily
+    // key-creation cap and took the app down. See CHANGELOG 2026-08-19.
+    dgToken = tok.token || tok.key;
+    dgAuth  = tok.auth || 'token';
+  } catch (e) {
+    if (!sessionActive) throw e;
+    showError('Deepgram Error', `Could not fetch STT token: ${e.message}`);
+    throw e;
+  }
+  if (!sessionActive) throw new Error('session ended');
+  if (onTokenFetched) onTokenFetched();
+
+  const params = new URLSearchParams({
+    model:            'nova-3',
+    smart_format:     'true',
+    language:         'en',
+    endpointing:      '150',    // how fast each little chunk finalizes (snappy captions)
+    interim_results:  'true',
+    vad_events:       'true',
+    utterance_end_ms: '1000',   // how long a pause means "actually done talking"
+  });
+  finalizedBuffer = '';   // reset the accumulated-so-far transcript for this connection
+
+  dbg('Connecting to Deepgram…');
+  dgWS = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, [dgAuth, dgToken]);
+
+  // Resolves only after startMediaRecorder() — "ready" must mean audio is
+  // genuinely being sent, not merely that a socket opened.
+  let markStreaming = () => {};
+  const streamingPromise = new Promise(resolve => { markStreaming = resolve; });
+
+  dgWS.onopen  = () => {
+    dbg('Deepgram connected');
+    dgOpenedAt = performance.now();
+    // The backoff is NOT reset here. Opening a socket is not proof the
+    // connection works — if Deepgram accepts it and drops it immediately,
+    // resetting on open makes the retry loop run at 1s forever and never
+    // back off. Each loop fetches a new STT token; under the old
+    // key-minting code that created a Deepgram API key every second, which
+    // is how we hit their daily cap and took the app down on 2026-08-19.
+    // Reset only once the connection has proven it can stay up.
+    clearTimeout(dgStableTimer);
+    dgStableTimer = setTimeout(() => {
+      dgReconnectDelay = 1000;
+      dgFailStreak = 0;
+      dbg('Deepgram connection stable — backoff reset');
+    }, DG_STABLE_MS);
+    startMediaRecorder();
+    markStreaming();
+  };
+  dgWS.onclose = evt => {
+    clearTimeout(dgStableTimer);
+    // Report why Deepgram dropped us. Without this the close code only
+    // exists in a console nobody is watching, and the reconnect churn is
+    // indistinguishable from a network blip.
+    reportClientEvent('deepgram_closed', {
+      code: evt.code,
+      state: appState,
+      uptime_ms: dgOpenedAt ? Math.round(performance.now() - dgOpenedAt) : -1,
+      fail_streak: dgFailStreak,
+    }, String(evt.reason || '').slice(0, 120));
+    if (sessionActive && appState === 'listening') {
+      dgFailStreak++;
+      if (dgFailStreak > DG_MAX_FAILS) {
+        dbg(`Deepgram failed ${dgFailStreak} times in a row — giving up`, true);
+        showError('Deepgram Error',
+          `Speech recognition could not stay connected after ${DG_MAX_FAILS} attempts. ` +
+          `Please restart the session.`);
+        return;
+      }
+      dbg(`Deepgram closed (${evt.code}) — retry ${dgFailStreak}/${DG_MAX_FAILS} in ${dgReconnectDelay}ms…`, true);
+      setTimeout(reopenDeepgramWS, dgReconnectDelay);
+      dgReconnectDelay = Math.min(dgReconnectDelay * 2, DG_RECONNECT_MAX_MS);
+    } else if (sessionActive) {
+      dbg(`Deepgram closed mid-turn (${appState}) — will reopen on listen`, true);
+    }
+  };
+  dgWS.onerror = () => {
+    if (!sessionActive) return;
+    showError('Deepgram Error', 'STT streaming connection failed');
+  };
+
+  dgWS.onmessage = evt => {
+    // Change 5: allow messages in speaking state for interrupt detection
+    if (appState !== 'listening' && appState !== 'speaking') return;
+
+    // Her startup greeting is playing and the microphone is live. Echo
+    // cancellation is not perfect, and startup sits in 'listening', where the
+    // >=3-word AEC bleed-through guard below does not apply — so her own
+    // "Hey you" would be transcribed as the user's first turn.
+    //
+    // Ignore what Deepgram sends rather than withholding what we send it:
+    // the audio stream must stay unbroken (see startMediaRecorder). Anything
+    // the mic caught around the edges is dropped when the greeting ends,
+    // where finalizedBuffer is cleared.
+    if (greetingPlaying) return;
+
+    let data;
+    try { data = JSON.parse(evt.data); } catch { return; }
+
+    if (data.type === 'SpeechStarted') return;
+
+    // ── True end of the user's utterance ────────────────────
+    // is_final just means one chunk finished transcribing — the user may
+    // still be mid-thought. UtteranceEnd is Deepgram's actual "they stopped
+    // talking" signal (fires after utterance_end_ms of real silence), so
+    // that's what we act on for a normal turn — sending only on is_final
+    // was cutting people off on ordinary pauses in longer sentences.
+    if (data.type === 'UtteranceEnd') {
+      if (appState !== 'listening') return;
+      const transcript = finalizedBuffer.trim();
+      finalizedBuffer = '';
+      if (!transcript) return;
+
+      userTextEl.textContent = `"${transcript}"`;
+      history._lastUser      = transcript;
+      clearReply();
+      audioQueue.reset();
+      _turnStart = performance.now();
+      turnTiming.markUtteranceEnd();
+      currentTurnId++;
+
+      setState('processing');
+      armStuckTimer();
+
+      if (!orchestratorWS || orchestratorWS.readyState !== WebSocket.OPEN) {
+        setReplyMessage('Not connected — please wait…');
+        clearStuckTimer();
+        resumeListening();
+        return;
+      }
+      orchestratorWS.send(JSON.stringify({ message: transcript }));
+      turnTiming.markSent();
+      return;
+    }
+
+    if (data.type !== 'Results') return;
+
+    const transcript = data.channel?.alternatives?.[0]?.transcript || '';
+
+    if (!data.is_final) {
+      // Show interim text: everything finalized so far + the live chunk
+      if (transcript && appState === 'listening') {
+        userTextEl.textContent = (finalizedBuffer + ' ' + transcript).trim();
+        userTextEl.className   = 'interim';
+      }
+      return;
+    }
+
+    // ── A chunk finalized (not necessarily the whole utterance) ───
+    userTextEl.className = '';
+    if (!transcript.trim()) return;
+
+    // Interrupt — user spoke while she was speaking. This stays fast and
+    // acts on each finalized chunk immediately rather than waiting for
+    // UtteranceEnd — barge-in needs to feel instant, unlike a normal turn.
+    // Require ≥3 words to avoid AEC bleed-through false positives
+    // (her own voice leaking back through the mic as a short garbled phrase).
+    if (appState === 'speaking') {
+      const wordCount = transcript.trim().split(/\s+/).filter(Boolean).length;
+      if (wordCount < 3) {
+        dbg(`speaking: short transcript ignored (${wordCount}w, likely AEC): "${transcript}"`);
+        return;
+      }
+      _triggerInterrupt(transcript);
+      return;
+    }
+
+    // Normal flow (listening state) — accumulate; the actual send happens
+    // on UtteranceEnd above, once the user is really done talking. The gap
+    // between this mark and UtteranceEnd is the endpointing wait, which is
+    // pure silence to the user — see turnTiming.
+    turnTiming.markFinalChunk();
+    finalizedBuffer = (finalizedBuffer + ' ' + transcript).trim();
+    userTextEl.textContent = finalizedBuffer;
+    dbg(`chunk finalized, buffer="${finalizedBuffer}" (waiting for pause)`);
+  };
+
+  return streamingPromise;
+}
+
+/** Reconnect wrapper — swallows rejections and drops setTimeout's timer arg. */
+function reopenDeepgramWS() {
+  openDeepgramWS().catch(e => dbg(`Deepgram reopen failed: ${e.message}`, true));
+}
+
+// ── MediaRecorder ──────────────────────────────────────────
+// Always running — never paused.  The recorder keeps Deepgram alive
+// so it can detect user speech for interrupt during her speaking.
+function startMediaRecorder() {
+  const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus' : 'audio/webm';
+  mediaRecorder = new MediaRecorder(micStream, { mimeType: mime });
+  mediaRecorder.ondataavailable = e => {
+    // NEVER withhold blobs here. MediaRecorder's FIRST blob carries the WebM
+    // container header, and a fresh recorder is created on every Deepgram
+    // onopen — so skipping early blobs drops the header and makes every later
+    // blob undecodable. Deepgram then reports NET-0001 ("did not receive audio
+    // data within the timeout window") and closes with 1011/1000, which looks
+    // nothing like the cause. That shipped on 2026-08-19 and killed turn 1 of
+    // every session. Silence her at the TRANSCRIPT level instead — see the
+    // greetingPlaying check in dgWS.onmessage.
+    if (e.data.size > 0 && dgWS?.readyState === WebSocket.OPEN) dgWS.send(e.data);
+  };
+  mediaRecorder.start(200);
+}
+
+function resumeListening() {
+  if (!sessionActive) return;
+  if (inputMode === 'text') { readyForTyping(); return; }
+  clearStuckTimer();
+  userTextEl.textContent = '';
+  finalizedBuffer = '';   // fresh turn — don't carry over anything from before
+  setState('listening');
+
+  const wsState = dgWS ? dgWS.readyState : -1;
+  if (wsState === WebSocket.CONNECTING) {
+    dbg('Deepgram reconnecting…'); return;
+  }
+  if (wsState !== WebSocket.OPEN) {
+    dbg('Deepgram closed — reopening…', true);
+    reopenDeepgramWS(); return;
+  }
+  // Recorder is always running — nothing to resume
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') startMediaRecorder();
+}
+
+// ── Waveform (Canvas 2D, flowing multi-strand glow lines — same
+//    technique the reference site uses) ───────────────────────
+const waveCanvas = document.getElementById('wave');
+const waveCtx    = waveCanvas.getContext('2d');
+let idlePhase    = 0;
+let waveLevel    = 0;   // smoothed 0-1 amplitude driving the strands
+// REDUCED_MOTION is declared near the background-video code above — it's
+// needed there before this point in the file.
+
+// Single dial for how present the strands are. The palettes below carry
+// the colour; this carries the strength, so it can be retuned without
+// rewriting six colour values.
+const WAVE_ALPHA = 0.42;
+/** Peak displacement as a fraction of row height, at waveLevel 1. */
+const WAVE_AMP   = 0.28;
+
+// Earth tones, derived from the headline gradient rather than picked by eye:
+// `listening` is the headline's three oklch stops converted to sRGB, so the
+// strands and the title are literally the same colours. The other states are
+// the same hues shifted in lightness/chroma — deeper and duller while she is
+// thinking, warmest while she is speaking.
+const STATE_PALETTES = {
+  idle:       ['rgba(176,163,137,0.34)', 'rgba(177,145,123,0.28)', 'rgba(164,131,124,0.24)'],  // dimmed sand/amber/clay
+  listening:  ['#eedcb7', '#f1b186', '#d7998c'],   // sand → amber → clay (= headline)
+  processing: ['#d1b18e', '#c7947d', '#b4857e'],   // deeper, duller earth
+  speaking:   ['#f7c795', '#f4a485', '#db918e'],   // warmest — lit sand → terracotta
+};
+
+// Three overlapping sine strands — different frequency/speed/phase per
+// strand is what gives the flowing, non-repetitive look rather than a
+// single mechanical wave.
+const STRANDS = [
+  { freq: 1.6, speed:  1.3, phase: 0.0, ampMul: 1.00 },
+  { freq: 2.3, speed: -1.7, phase: 1.4, ampMul: 0.68 },
+  { freq: 3.1, speed:  2.1, phase: 3.0, ampMul: 0.42 },
+];
+
+/**
+ * Loudness of whatever is passing through `node`, 0-1.
+ *
+ * TIME-domain RMS, not a frequency-bin average. The previous version averaged
+ * all 128 frequency bins, and speech energy lives in a handful of low ones —
+ * so the other ~120 near-zero bins dragged every reading toward the same small
+ * number and silence looked much like shouting. RMS measures actual waveform
+ * displacement, which is what a voice meter should track.
+ *
+ * The gain compensates for speech RMS being low in absolute terms (~0.05-0.25
+ * even when clearly audible); without it the wave would be technically
+ * responsive and visually flat, which is the bug this replaced.
+ */
+const LEVEL_GAIN = 3.4;
+function sampleAnalyserLevel(node) {
+  const buf = new Uint8Array(node.fftSize);
+  node.getByteTimeDomainData(buf);
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const v = (buf[i] - 128) / 128;   // byte 128 is silence
+    sum += v * v;
+  }
+  return Math.min(1, Math.sqrt(sum / buf.length) * LEVEL_GAIN);
+}
+
+function drawWave() {
+  if (!REDUCED_MOTION) requestAnimationFrame(drawWave);
+
+  const rect = waveCanvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  if (w === 0 || h === 0) return;
+
+  // Self-healing resize: keeps the canvas backing buffer in sync with its
+  // CSS box (and devicePixelRatio) without needing a load/resize listener
+  // that could run before layout settles and leave it stuck at 1x1.
+  const dpr   = window.devicePixelRatio || 1;
+  const needW = Math.max(1, Math.round(w * dpr));
+  const needH = Math.max(1, Math.round(h * dpr));
+  if (waveCanvas.width !== needW || waveCanvas.height !== needH) {
+    waveCanvas.width  = needW;
+    waveCanvas.height = needH;
+    waveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  waveCtx.clearRect(0, 0, w, h);
+
+  // ── Target amplitude for this frame ─────────────────────────
+  // Idle sits low so that ANY voice is a visible change. The gap between the
+  // idle floor and a speaking peak is the whole point — a high floor is what
+  // made the old wave look like it was ignoring the conversation.
+  let target = 0.08;
+  if (appState === 'listening' && analyser) {
+    target = 0.10 + sampleAnalyserLevel(analyser) * 0.90;          // his voice
+  } else if (appState === 'speaking' && playbackAnalyser) {
+    target = 0.10 + sampleAnalyserLevel(playbackAnalyser) * 0.90;  // her voice
+  } else if (appState === 'processing') {
+    target = 0.18 + 0.05 * Math.sin(idlePhase * 2);                // thinking
+  }
+  // Rise fast, fall slow. Symmetric easing either lags the attack of a
+  // syllable or flickers on the gaps between them; this tracks speech onset
+  // while smoothing the troughs.
+  const ease = target > waveLevel ? 0.35 : 0.12;
+  waveLevel += (target - waveLevel) * ease;
+
+  idlePhase += 0.02;
+  const colors = STATE_PALETTES[appState] || STATE_PALETTES.idle;
+  const midY   = h / 2;
+  // Shallow on purpose. Combined with the shorter row this caps travel at
+  // roughly 19px, so the strands answer the voice without lurching.
+  const amp    = h * WAVE_AMP * waveLevel;
+
+  waveCtx.globalCompositeOperation = 'lighter';   // additive glow where strands overlap
+
+  STRANDS.forEach((s, i) => {
+    const steps = 140;
+    waveCtx.beginPath();
+    for (let n = 0; n <= steps; n++) {
+      const t  = n / steps;
+      const x  = t * w;
+      const envelope = Math.sin(Math.PI * t);   // 0 at edges, 1 at center
+      const y  = midY + envelope * amp * s.ampMul *
+                 Math.sin(t * Math.PI * 2 * s.freq + idlePhase * s.speed + s.phase);
+      if (n === 0) waveCtx.moveTo(x, y); else waveCtx.lineTo(x, y);
+    }
+    const color = colors[i] || colors[colors.length - 1];
+    waveCtx.globalAlpha = WAVE_ALPHA;
+    waveCtx.lineWidth   = 1.6;
+    waveCtx.strokeStyle = color;
+    waveCtx.shadowBlur  = 10;
+    waveCtx.shadowColor = color;
+    waveCtx.stroke();
+  });
+
+  waveCtx.globalCompositeOperation = 'source-over';
+  waveCtx.globalAlpha = 1;
+  waveCtx.shadowBlur = 0;
+}
+requestAnimationFrame(drawWave);
+
+// ── Session control ────────────────────────────────────────
+async function startSession() {
+  try {
+    sessionActive = true;
+    currentTurnId = 0;
+    // Fresh session — clear any retry state left over from a previous one,
+    // so a session that ended badly doesn't start the next one already
+    // backed off or already at the give-up threshold.
+    dgReconnectDelay = 1000;
+    dgFailStreak = 0;
+    clearTimeout(dgStableTimer);
+    sessionBtn.textContent = 'End Session';
+    sessionBtn.classList.add('active');
+    sessionBtn.setAttribute('aria-pressed', 'true');
+    sessionBtn.disabled = true;          // no double-starts while connecting
+    userTextEl.textContent = '';
+    history = [];
+    audioQueue.reset();
+    // Armed once per session, not once per socket — see requestGreeting().
+    greetingPending = true;
+    greetingText    = '';
+
+    // Progress reflects real milestones. Nothing here is a timer — each step
+    // advances only when that stage has genuinely completed.
+    setState('connecting');
+    clearReply();
+    setStartupStep(0);                   // starting audio
+
+    audioCtx = new AudioContext();
+    await audioCtx.resume();
+    playbackAnalyser = audioCtx.createAnalyser();
+    playbackAnalyser.fftSize = 256;
+    playbackAnalyser.connect(audioCtx.destination);
+    dbg(`AudioContext ready (${audioCtx.state})`);
+
+    // Seeded before the socket opens, not after. The greeting can land as
+    // soon as the connection does, and clearing the log afterwards would
+    // wipe it — and the intro line reads better arriving instantly anyway.
+    if (inputMode === 'text') {
+      chatLog.innerHTML = '';
+      herBubble = null;
+      addChatMessage(`You're chatting with ${currentCharacterName()}. She still speaks out loud — use the speaker button to mute her.`, 'her', true);
+    }
+
+    setStartupStep(1);                   // connecting
+    const orchestratorReady = connectOrchestrator();
+
+    if (inputMode === 'text') {
+      // No microphone, no Deepgram, no STT token. Text mode only needs the
+      // orchestrator socket — and audio playback, unless she is muted.
+      await orchestratorReady;
+      if (!sessionActive) return;
+      setStartupStep(5);
+      readyForTyping();
+      return;
+    }
+
+    setStartupStep(2);                   // microphone access (browser prompt)
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    dbg('Microphone access granted (AEC on)');
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    audioCtx.createMediaStreamSource(micStream).connect(analyser);
+
+    setStartupStep(3);                   // getting voice key
+    // Resolves only once the recorder is actually running.
+    const streaming = openDeepgramWS(() => setStartupStep(4)); // opening speech channel
+
+    await Promise.all([orchestratorReady, streaming]);
+    if (!sessionActive) return;          // user hit End while connecting
+
+    setStartupStep(5);                   // ready
+    setState('listening');
+  } catch(e) {
+    if (e && e.name === 'NotAllowedError') {
+      showError('Microphone Blocked', 'Allow microphone access, then press Start Session again.');
+    } else {
+      showError('Session Start Failed', e.message || String(e));
+    }
+    endSession();
+  } finally {
+    sessionBtn.disabled = false;
+  }
+}
+
+function endSession() {
+  sessionActive = false;
+  clearStuckTimer();
+  setState('idle');
+  sessionBtn.textContent = inputMode === 'text' ? 'Start Chat' : 'Start Session';
+  sessionBtn.classList.remove('active');
+  sessionBtn.setAttribute('aria-pressed', 'false');
+  sessionBtn.disabled = false;
+  startupBar.style.width = '0%';   // reset so the next start animates from empty
+  // The standing instruction was removed 2026-08-28. #reply-text reserves its
+  // own height either way, so clearing it shifts nothing.
+  replyEl.innerHTML = '';
+  userTextEl.textContent = '';
+  latencyEl.textContent  = '';
+  herBubble = null;
+  chatSend.disabled = false;
+  audioQueue.reset();
+
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  mediaRecorder = null;
+  if (dgWS)       { dgWS.close(); dgWS = null; }
+  if (micStream)  { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  analyser = null;
+  playbackAnalyser = null;
+  if (audioCtx)   { audioCtx.close().catch(()=>{}); audioCtx = null; }
+  if (orchestratorWS) { orchestratorWS.close(); orchestratorWS = null; }
+
+  connDot.textContent = 'ready';
+  connDot.className   = '';
+}
+
+sessionBtn.addEventListener('click', () => {
+  if (!sessionActive) startSession(); else endSession();
+});
+
+bootstrapAuth();
+</script>
+</body>
+</html>

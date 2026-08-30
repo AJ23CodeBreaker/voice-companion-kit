@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: worker/package-lock.json
+
+      - run: npm ci
+
+      # personas.generated.ts is gitignored and written at build time, so this
+      # has to run BEFORE typecheck. Without it every run dies on "Cannot find
+      # module './personas.generated'" without reaching a single test.
+      - run: npm run build
+
+      - run: npm run typecheck
+
+      # Runs both suites: pure functions in node, plus the Durable Object tests
+      # in real workerd. No API keys needed by either.
+      - run: npm test

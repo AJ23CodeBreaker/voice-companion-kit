@@ -1,0 +1,14 @@
+{
+  // The eval harness runs in Node, not in the Workers runtime, so it needs
+  // Node's globals (process, fs, url). Kept as a separate config so the
+  // Worker's own type-check stays strictly Workers-only — nothing in src/
+  // should ever compile against Node types by accident.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "@cloudflare/workers-types"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true
+  },
+  "include": ["eval/**/*.ts", "src/**/*.ts"]
+}

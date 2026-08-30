@@ -1,0 +1,29 @@
+{
+  "name": "voice-companion-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/generate-personas.mjs",
+    "predev": "npm run build",
+    "predeploy": "npm run build",
+    "pretest": "npm run build",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run && vitest run -c vitest.workers.config.mts",
+    "test:fast": "vitest run",
+    "test:do": "vitest run -c vitest.workers.config.mts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.eval.json",
+    "eval:memory": "npm run build && tsx --env-file-if-exists=.dev.vars eval/memory.ts",
+    "eval:extraction": "npm run build && tsx --env-file-if-exists=.dev.vars eval/extraction.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260801.1",
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.20.0"
+  }
+}

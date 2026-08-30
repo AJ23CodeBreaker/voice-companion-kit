@@ -10,6 +10,7 @@ part of this repo worth copying.
 | **02** | [Memory](02-memory.md) | The four stores, the state card, the absence rule, **the amplifier** |
 | **03** | [Evaluation](03-evaluation.md) | Four harnesses, and the methodology mistakes that cost real time |
 | **04** | [Prompting](04-prompting.md) | Writing a character that sounds like a person |
+| **05** | [Walls we hit](05-walls-we-hit.md) | Every bug that was shipped, believed, and expensive |
 
 ---
 

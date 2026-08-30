@@ -148,6 +148,32 @@ See [doc/03-evaluation.md](doc/03-evaluation.md).
 
 ---
 
+## Walls we hit
+
+Every bug in [doc/05-walls-we-hit.md](doc/05-walls-we-hit.md) was shipped,
+believed, and expensive. None were findable by reading the code, and most looked
+like something else when they happened.
+
+A few, so you can recognise them early:
+
+- **A container stream cannot be paused by dropping packets.** Withholding mic
+  audio during the greeting threw away the WebM header and made every later
+  packet undecodable. It presented as a network timeout.
+- **Never put a copyable example in a prompt whose output is stored.** A small
+  model copied the example summary into real memories for days. Nothing errored.
+- **Line endings are prompt content.** CRLF-on-checkout silently invalidated the
+  cached prefix, invisible in every diff.
+- **A per-connection object cannot hold state that outlives the connection.**
+  Working memory died on exactly the reconnect it existed to survive.
+- **`className = x` destroys state you did not know was there.** Text mode was
+  broken from the day it shipped, after being "verified structurally".
+- **Do not act on a three-run eval result.** Caught this project three times.
+
+Most share one shape: *something was verified in a way that could not have
+caught the failure.*
+
+---
+
 ## Running it
 
 ```bash

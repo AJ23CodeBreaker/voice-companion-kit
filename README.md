@@ -177,13 +177,23 @@ Full setup, including creating an account: [doc/00-getting-started.md](doc/00-ge
   Bring your own.
 - **One demo character.** The shape is what matters, and a second teaches
   nothing the first does not.
-- **No adult content.** The pilot this came from is adult-capable; none of that
-  layer is in this repo, and the behaviour prompt here is written for SFW use.
+- **Not built for adult content.** See [Scope](#scope) below.
 - **No scaling work.** One Durable Object per user is right for tens of users
   and would need thought at thousands.
 
+## Scope
+
+**This kit is not built for NSFW conversation.** The demo character and the
+shared behaviour prompt are written for ordinary conversation, and nothing here
+is tuned, prompted or tested for anything else.
+
+If you use it as a foundation, what you build on top of it is your own decision
+and your own responsibility — including complying with the terms of whichever
+model, voice and hosting providers you plug in, which each have their own rules
+about content. This project takes no responsibility for downstream use.
+
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE) — provided as-is, without warranty of any kind.
 
 Not affiliated with any model, TTS or hosting provider named here.

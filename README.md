@@ -199,6 +199,10 @@ Full setup, including creating an account: [doc/00-getting-started.md](doc/00-ge
 
 ## What is deliberately not here
 
+- **No UI design.** `web/` is a deliberately plain reference client — a token
+  box, a Connect button, a text input. It exists to prove the Worker works and
+  to show the protocol. You will build your own, and a styled one would only be
+  something to delete first.
 - **No character media.** No video, no images, no cloned-voice identifiers.
   Bring your own.
 - **One demo character.** The shape is what matters, and a second teaches

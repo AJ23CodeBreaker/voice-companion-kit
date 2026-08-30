@@ -82,7 +82,12 @@ cd web
 python -m http.server 8791
 ```
 
-Open http://localhost:8791 and sign in.
+Open http://localhost:8791.
+
+The page is a **deliberately plain reference client** — a token box, a Connect
+button, and a text input. There is no login form and no styling, because how
+you authenticate people and what your product looks like are your decisions,
+not this kit's. Paste the token from step 2 and press Connect.
 
 `web/config.js` already points at `localhost:8787`. If you move either side,
 update it **and** add the new frontend origin to `ALLOWED_ORIGINS` in

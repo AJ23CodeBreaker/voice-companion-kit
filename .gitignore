@@ -17,8 +17,5 @@ worker/src/personas.generated.ts
 # Eval output. Contains full transcripts.
 worker/eval/results/
 
-# Background clips are yours to supply; none ship with this repo.
-web/bg/*.mp4
-
 .DS_Store
 Thumbs.db

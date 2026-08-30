@@ -144,7 +144,7 @@ export async function summariseEpisode(
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://mia.local",
+        "HTTP-Referer": "https://localhost",
         "X-Title": "Voice Companion Kit — memory",
       },
       body: JSON.stringify({

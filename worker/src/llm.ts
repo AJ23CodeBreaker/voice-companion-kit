@@ -97,7 +97,7 @@ export async function streamLlmReply(opts: StreamLlmOptions): Promise<StreamLlmR
           headers: {
             Authorization: `Bearer ${opts.apiKey}`,
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://mia.local",
+            "HTTP-Referer": "https://localhost",
             "X-Title": "Voice Companion Kit",
           },
           body: JSON.stringify({
@@ -234,7 +234,7 @@ export async function warmLlmRoute(apiKey: string, signal?: AbortSignal): Promis
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://mia.local",
+        "HTTP-Referer": "https://localhost",
         "X-Title": "Voice Companion Kit",
       },
       // Same shape as a real turn (streamed, same model) so it warms the

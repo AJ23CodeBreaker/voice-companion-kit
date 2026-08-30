@@ -14,7 +14,7 @@
  * never reaches a browser.
  */
 
-window.MIA_CONFIG = {
+window.APP_CONFIG = {
   WS_URL:       'ws://localhost:8787/ws',
   API_BASE_URL: 'http://localhost:8787',
 };

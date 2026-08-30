@@ -1,4 +1,4 @@
-<!-- Anteros — Voice page. Live frontend, deployed to Netlify.
+<!-- Voice companion — the whole frontend, one hand-written file.
      Backend is the Cloudflare Worker configured in config.js.
      Requires sign-in; the Worker rejects unauthenticated requests. -->
 <!DOCTYPE html>
@@ -784,13 +784,16 @@
 
   <div id="stage">
     <div id="status" aria-live="polite">ready</div>
-    <div id="headline">Talk to Callie.</div>
+    <div id="headline">Talk to her.</div>
     <!-- Its own row, directly under the title. Kept OUT of #headline: 
          setCharacterHeadline() assigns headlineEl.textContent, which replaces
          every child node, so a canvas parented there would be destroyed the
          first time anyone switched character. -->
     <div id="wave-wrap" aria-hidden="true"><canvas id="wave"></canvas></div>
-    <div id="char-desc">A single mum who always cares about people</div>
+    <!-- Placeholder only. setCharacterHeadline() replaces both this and the
+         headline above from the Worker /characters response as soon as it
+         arrives, so anything here is visible for one frame at most. -->
+    <div id="char-desc">&nbsp;</div>
 
     <div id="char-picker"></div>
 
@@ -824,7 +827,7 @@
   <div id="login-overlay" role="dialog" aria-modal="true" aria-labelledby="login-title" hidden>
     <div id="gate-card">
       <h2 id="login-title">Sign in</h2>
-      <p>This is a private test build. Sign in to continue.</p>
+      <p>Sign in to continue. Accounts are created by the operator - see doc/00-getting-started.md.</p>
       <form id="login-form" autocomplete="on">
         <label class="fld" for="login-user">Username</label>
         <input id="login-user" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required />
@@ -850,10 +853,10 @@
 
 <script src="config.js"></script>
 <script>
-const WS_URL       = window.MIA_CONFIG.WS_URL;
-const API_BASE     = window.MIA_CONFIG.API_BASE_URL;
+const WS_URL       = window.APP_CONFIG.WS_URL;
+const API_BASE     = window.APP_CONFIG.API_BASE_URL;
 
-console.log(`[Anteros] config loaded WS_URL=${WS_URL}`);
+console.log(`[companion] config loaded WS_URL=${WS_URL}`);
 if (!WS_URL || !API_BASE) {
   document.getElementById('debug-info').textContent = 'Config error — check console';
   document.getElementById('debug-info').className = 'error';
@@ -1098,8 +1101,12 @@ function setBackgroundVideo(characterId) {
   incoming.addEventListener('error', () => {
     // A missing or broken clip should leave the current background alone
     // rather than fading to black.
+    //
+    // Not flagged as an error: no clips ship with this kit, so this is the
+    // NORMAL path on a fresh checkout. Colouring it red would train a new
+    // developer to ignore the one place real errors appear.
     settled = true;
-    dbg(`background video failed: ${src}`, true);
+    dbg(`no background clip for this character (${src})`);
   }, { once: true });
 
   incoming.src = src;
@@ -1145,7 +1152,7 @@ async function loadCharacterPicker() {
     charPickerEl.appendChild(btn);
   });
 
-  // Reflect whichever character is selected on arrival (Callie by default).
+  // Reflect whichever character is selected on arrival (the first, by default).
   const current = chars[selectedCharacter];
   if (current) setCharacterHeadline(current.name, current.desc);
   setBackgroundVideo(selectedCharacter);
@@ -1417,7 +1424,7 @@ function tms() { return _turnStart ? `+${Math.round(performance.now()-_turnStart
 
 function dbg(msg, isError) {
   const ts = new Date().toTimeString().slice(0,8);
-  console.log(`[mia ${ts} ${tms()}] ${msg}`);
+  console.log(`[companion ${ts} ${tms()}] ${msg}`);
   debugEl.textContent = msg;
   debugEl.className   = isError ? 'error' : '';
 }

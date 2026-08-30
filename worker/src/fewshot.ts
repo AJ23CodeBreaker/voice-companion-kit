@@ -3,10 +3,10 @@
 // Why these exist as message pairs rather than prose rules in behavior.txt:
 // published guidance is consistent that examples influence formatting and
 // local patterns more stably than equivalent verbal instructions. The
-// 2026-08-18 baseline eval showed the prose rules failing in both directions
-// at once — greeting 56% over budget, adversarial 93% over, backstory 57%
-// over, while intimate build-up sat at 25.6w against a 110w budget and never
-// once exceeded it. So this is not "be briefer".
+// baseline eval showed the prose rules failing in both directions at once —
+// greeting 56% over budget, adversarial 93% over, backstory 57% over, while
+// the category that was supposed to run long sat at 25.6w against a 110w
+// budget and never once exceeded it. So this is not "be briefer".
 //
 // ── Revision 2 (same day) ──────────────────────────────────────────────
 // Revision 1 caused verbatim parroting: 8 of 345 eval replies reproduced an

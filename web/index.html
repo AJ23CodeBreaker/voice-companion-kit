@@ -638,7 +638,7 @@
     #login-submit:disabled { opacity: 0.45; cursor: not-allowed; }
     #login-submit:not(:disabled):hover { background: rgba(122,240,200,0.26); }
 
-    /* ── Consent / age gate ──────────────────────────────────────── */
+    /* ── AI disclosure gate ──────────────────────────────────────── */
     #gate-overlay {
       position: fixed;
       inset: 0;
@@ -839,10 +839,10 @@
   <div id="gate-overlay" role="dialog" aria-modal="true" aria-labelledby="gate-title" hidden>
     <div id="gate-card">
       <h2 id="gate-title">Before you continue</h2>
-      <p>She is an AI character, not a real person — every reply is generated. This experience can include AI-generated adult (18+) content and is intended for adults only.</p>
+      <p>She is an AI character, not a real person — every reply is generated, including anything she says about herself, her life and her feelings.</p>
       <label id="gate-check">
         <input type="checkbox" id="gate-checkbox" />
-        <span>I am 18 years of age or older and I understand I'm talking with an AI, not a human.</span>
+        <span>I understand I'm talking with an AI, not a human.</span>
       </label>
       <button id="gate-continue" disabled>Continue</button>
     </div>
@@ -923,11 +923,16 @@ loginForm.addEventListener('submit', async (e) => {
   }
 });
 
-// ── Age / consent gate ──────────────────────────────────────
-// Required disclosure: the user is talking to an AI, not a person, and the
-// experience can include adult content. Remembered in localStorage so
-// returning users aren't re-gated every visit — the persistent #ai-badge
-// in the topbar covers the "regular disclosure" requirement after this.
+// ── AI disclosure gate ──────────────────────────────────────
+// Shown once, before the first session: the user is talking to an AI, not a
+// person. Remembered in localStorage so returning users are not re-gated
+// every visit — the persistent #ai-badge in the topbar carries the ongoing
+// disclosure after that.
+//
+// Worth keeping if you fork this. A companion that is convincing enough to
+// be worth building is convincing enough to need saying out loud once, and
+// several jurisdictions are moving toward requiring exactly this. If your
+// build carries content this one does not, this dialog is where you say so.
 const GATE_CONSENT_KEY = 'companion_gate_consent_v1';
 const gateOverlay  = document.getElementById('gate-overlay');
 const gateCheckbox = document.getElementById('gate-checkbox');
